@@ -1,0 +1,144 @@
+import uuid
+import secrets
+from datetime import datetime, timezone
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from pydantic import BaseModel
+from app.core.database import get_db
+from app.api.v1.endpoints.auth import get_current_user
+from app.models.sip import SIPExtension
+from app.models.tenant import Tenant
+from app.models.pending_change import PendingChange
+from app.models.user import User
+
+router = APIRouter()
+
+
+class ExtOut(BaseModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    extension: str
+    name: str
+    username: str
+    voicemail_enabled: bool
+    voicemail_email: str | None
+    caller_id_name: str | None
+    caller_id_number: str | None
+    record_calls: bool
+    max_contacts: int
+    is_active: bool
+    asterisk_synced: bool
+    created_at: datetime
+
+class ExtCreate(BaseModel):
+    extension: str
+    name: str
+    voicemail_enabled: bool = True
+    voicemail_email: str | None = None
+    caller_id_name: str | None = None
+    caller_id_number: str | None = None
+    record_calls: bool = False
+    max_contacts: int = 3
+    password: str | None = None  # auto-generated if not provided
+
+class ExtUpdate(BaseModel):
+    name: str | None = None
+    voicemail_enabled: bool | None = None
+    voicemail_email: str | None = None
+    caller_id_name: str | None = None
+    caller_id_number: str | None = None
+    record_calls: bool | None = None
+    max_contacts: int | None = None
+    is_active: bool | None = None
+    password: str | None = None
+
+
+def _out(e: SIPExtension) -> ExtOut:
+    return ExtOut(
+        id=e.id, tenant_id=e.tenant_id, extension=e.extension, name=e.name,
+        username=e.username, voicemail_enabled=e.voicemail_enabled, voicemail_email=e.voicemail_email,
+        caller_id_name=e.caller_id_name, caller_id_number=e.caller_id_number,
+        record_calls=e.record_calls, max_contacts=e.max_contacts,
+        is_active=e.is_active, asterisk_synced=e.asterisk_synced, created_at=e.created_at,
+    )
+
+
+@router.get("/tenant/{tenant_id}", response_model=list[ExtOut])
+async def list_extensions(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    result = await db.execute(select(SIPExtension).where(SIPExtension.tenant_id == tenant_id).order_by(SIPExtension.extension))
+    return [_out(e) for e in result.scalars().all()]
+
+
+@router.post("/tenant/{tenant_id}", response_model=ExtOut, status_code=status.HTTP_201_CREATED)
+async def create_extension(tenant_id: uuid.UUID, payload: ExtCreate, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    tenant = await db.get(Tenant, tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant introuvable")
+    # Build unique username: {account_number}-{extension}
+    username = f"{tenant.account_number}-{payload.extension}"
+    existing = await db.execute(select(SIPExtension).where(SIPExtension.username == username))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail=f"Extension {payload.extension} déjà existante pour ce tenant")
+    password = payload.password or secrets.token_urlsafe(12)
+    ext = SIPExtension(
+        tenant_id=tenant_id, extension=payload.extension, name=payload.name,
+        username=username, password=password,
+        voicemail_enabled=payload.voicemail_enabled, voicemail_email=payload.voicemail_email,
+        caller_id_name=payload.caller_id_name, caller_id_number=payload.caller_id_number,
+        record_calls=payload.record_calls, max_contacts=payload.max_contacts,
+    )
+    db.add(ext)
+    # Record pending change for Asterisk sync
+    change = PendingChange(
+        tenant_id=tenant_id, change_type="add_extension", entity_type="extension",
+        payload={"username": username, "extension": payload.extension, "name": payload.name, "password": password},
+        created_by=user.email,
+    )
+    db.add(change)
+    await db.commit()
+    await db.refresh(ext)
+    return _out(ext)
+
+
+@router.put("/{ext_id}", response_model=ExtOut)
+async def update_extension(ext_id: uuid.UUID, payload: ExtUpdate, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    result = await db.execute(select(SIPExtension).where(SIPExtension.id == ext_id))
+    ext = result.scalar_one_or_none()
+    if not ext:
+        raise HTTPException(status_code=404, detail="Extension introuvable")
+    data = payload.model_dump(exclude_unset=True)
+    new_password = data.pop("password", None)
+    if new_password:
+        ext.password = new_password
+    for k, v in data.items():
+        setattr(ext, k, v)
+    ext.asterisk_synced = False
+    ext.updated_at = datetime.now(timezone.utc)
+    change = PendingChange(
+        tenant_id=ext.tenant_id, change_type="update_extension", entity_type="extension",
+        entity_id=str(ext_id),
+        payload={k: v for k, v in data.items()},
+        created_by=user.email,
+    )
+    db.add(change)
+    await db.commit()
+    await db.refresh(ext)
+    return _out(ext)
+
+
+@router.delete("/{ext_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_extension(ext_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    result = await db.execute(select(SIPExtension).where(SIPExtension.id == ext_id))
+    ext = result.scalar_one_or_none()
+    if not ext:
+        raise HTTPException(status_code=404, detail="Extension introuvable")
+    change = PendingChange(
+        tenant_id=ext.tenant_id, change_type="remove_extension", entity_type="extension",
+        entity_id=str(ext_id),
+        payload={"username": ext.username, "extension": ext.extension},
+        created_by=user.email,
+    )
+    db.add(change)
+    await db.delete(ext)
+    await db.commit()
