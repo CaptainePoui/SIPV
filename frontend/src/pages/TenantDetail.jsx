@@ -101,7 +101,7 @@ export default function TenantDetail() {
                   <td>{e.name}</td>
                   <td><code>{e.username}</code></td>
                   <td>{e.voicemail_email || '—'}</td>
-                  <td><span className={`badge ${e.asterisk_synced ? 'badge-green' : 'badge-orange'}`}>{e.asterisk_synced ? 'Oui' : 'En attente'}</span></td>
+                  <td><span className={`badge ${e.freeswitch_synced ? 'badge-green' : 'badge-orange'}`}>{e.freeswitch_synced ? 'Oui' : 'En attente'}</span></td>
                   <td><button className="btn btn-danger btn-sm" onClick={() => deleteExt(e.id)}>Suppr.</button></td>
                 </tr>
               ))}

@@ -10,10 +10,10 @@ class Settings(BaseSettings):
     ERPCRM_HOST: str = "192.168.1.9"
     ERPCRM_API_URL: str = "http://192.168.1.9:8010"
     ERPCRM_API_KEY: str = ""
-    REDIS_URL: str = "redis://localhost:6379/0"
-    ASTERISK_ARI_URL: str = "http://localhost:8088"
-    ASTERISK_ARI_USER: str = "sipv"
-    ASTERISK_ARI_PASSWORD: str = "change_me"
+    # FreeSWITCH ESL (Event Socket Library)
+    FREESWITCH_HOST: str = "127.0.0.1"
+    FREESWITCH_ESL_PORT: int = 8021
+    FREESWITCH_ESL_PASSWORD: str = "ClueCon"
 
     class Config:
         env_file = ".env"

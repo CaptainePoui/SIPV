@@ -28,7 +28,7 @@ class SIPExtension(Base):
     max_contacts: Mapped[int] = mapped_column(Integer, default=3)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     # Sync state
-    asterisk_synced: Mapped[bool] = mapped_column(Boolean, default=False)
+    freeswitch_synced: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -56,7 +56,7 @@ class SIPTrunk(Base):
     # Failover trunk
     failover_trunk_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("sip_trunks.id", ondelete="SET NULL"))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    asterisk_synced: Mapped[bool] = mapped_column(Boolean, default=False)
+    freeswitch_synced: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="trunks")

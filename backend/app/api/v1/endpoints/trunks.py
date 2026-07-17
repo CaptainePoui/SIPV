@@ -30,7 +30,7 @@ class TrunkOut(BaseModel):
     caller_id: str | None
     failover_trunk_id: uuid.UUID | None
     is_active: bool
-    asterisk_synced: bool
+    freeswitch_synced: bool
     created_at: datetime
 
 class TrunkCreate(BaseModel):
@@ -60,7 +60,7 @@ def _out(t: SIPTrunk) -> TrunkOut:
         id=t.id, tenant_id=t.tenant_id, name=t.name, carrier_name=t.carrier_name,
         host=t.host, username=t.username, from_domain=t.from_domain, caller_id=t.caller_id,
         failover_trunk_id=t.failover_trunk_id, is_active=t.is_active,
-        asterisk_synced=t.asterisk_synced, created_at=t.created_at,
+        freeswitch_synced=t.freeswitch_synced, created_at=t.created_at,
     )
 
 
@@ -94,7 +94,7 @@ async def update_trunk(trunk_id: uuid.UUID, payload: TrunkUpdate, db: AsyncSessi
         raise HTTPException(status_code=404, detail="Trunk introuvable")
     for k, v in payload.model_dump(exclude_unset=True).items():
         setattr(t, k, v)
-    t.asterisk_synced = False
+    t.freeswitch_synced = False
     change = PendingChange(
         tenant_id=t.tenant_id, change_type="update_trunk", entity_type="trunk",
         entity_id=str(trunk_id), payload=payload.model_dump(exclude_unset=True), created_by=user.email,

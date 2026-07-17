@@ -1,6 +1,9 @@
 """
-Commit/Checkpoint system for Asterisk config changes.
-Pending changes are queued and applied to Asterisk PJSIP Realtime tables atomically.
+Commit/Checkpoint system for FreeSWITCH config changes.
+Pending changes are queued for audit/tracking; applying them means invalidating
+FreeSWITCH's mod_xml_curl cache so it re-fetches live directory/dialplan XML
+from the DB (see xml_curl.py). There is no local realtime table to write to,
+unlike the abandoned Asterisk PJSIP Realtime approach.
 """
 import uuid
 from datetime import datetime, timezone
@@ -9,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 from app.core.database import get_db
+from app.core.esl import get_esl, ESLClient
 from app.api.v1.endpoints.auth import get_current_user
 from app.models.pending_change import PendingChange
 from app.models.sip import SIPExtension, SIPTrunk, TenantDID
@@ -38,52 +42,18 @@ class CommitResult(BaseModel):
     errors: list[str]
 
 
-async def _apply_change_to_asterisk(change: PendingChange, db: AsyncSession) -> bool:
-    """Write a pending change to the Asterisk PJSIP Realtime tables."""
+async def _apply_change_to_freeswitch(esl: ESLClient) -> str | None:
+    """
+    Invalidate FreeSWITCH's mod_xml_curl cache so it re-fetches live directory/dialplan
+    XML from the DB on the next lookup (see xml_curl.py). FreeSWITCH has no local realtime
+    table to write to — the config is generated on-demand from PostgreSQL.
+    Returns an error message on failure, None on success.
+    """
     try:
-        if change.entity_type == "extension":
-            if change.change_type == "add_extension":
-                payload = change.payload
-                username = payload["username"]
-                # ps_endpoints
-                await db.execute(
-                    __import__('sqlalchemy').text("""
-                    INSERT INTO ps_endpoints (id, context, aors, auth, disallow, allow, direct_media, force_rport, rewrite_contact, language, callerid)
-                    VALUES (:id, :context, :id, :auth, 'all', 'ulaw,alaw,g722', 'no', 'yes', 'yes', 'fr', :callerid)
-                    ON CONFLICT (id) DO UPDATE SET context=EXCLUDED.context, aors=EXCLUDED.aors, auth=EXCLUDED.auth
-                    """),
-                    {"id": username, "context": f"from-internal", "auth": username,
-                     "callerid": f'"{payload.get("name", username)}" <{payload.get("extension", username)}>'}
-                )
-                # ps_auths
-                await db.execute(
-                    __import__('sqlalchemy').text("""
-                    INSERT INTO ps_auths (id, auth_type, username, password)
-                    VALUES (:id, 'userpass', :username, :password)
-                    ON CONFLICT (id) DO UPDATE SET password=EXCLUDED.password
-                    """),
-                    {"id": username, "username": username, "password": payload["password"]}
-                )
-                # ps_aors
-                await db.execute(
-                    __import__('sqlalchemy').text("""
-                    INSERT INTO ps_aors (id, max_contacts, remove_existing, qualify_frequency)
-                    VALUES (:id, 3, 'yes', 60)
-                    ON CONFLICT (id) DO NOTHING
-                    """),
-                    {"id": username}
-                )
-
-            elif change.change_type == "remove_extension":
-                username = change.payload.get("username")
-                if username:
-                    for table in ["ps_contacts", "ps_aors", "ps_auths", "ps_endpoints"]:
-                        await db.execute(__import__('sqlalchemy').text(f"DELETE FROM {table} WHERE id = :id"), {"id": username})
-
-        return True
+        await esl.reload_xml()
+        return None
     except Exception as e:
-        change.error_message = str(e)
-        return False
+        return str(e)
 
 
 @router.get("/pending/{tenant_id}", response_model=list[PendingChangeOut])
@@ -103,7 +73,7 @@ async def list_pending(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db),
 
 @router.post("/commit/{tenant_id}", response_model=CommitResult)
 async def commit_changes(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
-    """Apply all pending changes for a tenant to Asterisk Realtime tables."""
+    """Apply all pending changes for a tenant by invalidating the FreeSWITCH XML cache."""
     result = await db.execute(
         select(PendingChange)
         .where(PendingChange.tenant_id == tenant_id, PendingChange.status == "pending")
@@ -118,22 +88,26 @@ async def commit_changes(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db
     failed = 0
     errors = []
 
+    esl = await get_esl()
+    reload_error = await _apply_change_to_freeswitch(esl)
+
     for change in changes:
-        success = await _apply_change_to_asterisk(change, db)
-        if success:
-            change.status = "applied"
-            change.applied_at = datetime.now(timezone.utc)
-            # Mark extension as synced
-            if change.entity_id and change.entity_type == "extension":
-                ext_result = await db.execute(select(SIPExtension).where(SIPExtension.id == change.entity_id))
-                ext = ext_result.scalar_one_or_none()
-                if ext:
-                    ext.asterisk_synced = True
-            applied += 1
-        else:
+        if reload_error:
             change.status = "failed"
+            change.error_message = reload_error
             failed += 1
-            errors.append(f"{change.change_type} [{change.entity_id}]: {change.error_message}")
+            errors.append(f"{change.change_type} [{change.entity_id}]: {reload_error}")
+            continue
+
+        change.status = "applied"
+        change.applied_at = datetime.now(timezone.utc)
+        # Mark extension as synced
+        if change.entity_id and change.entity_type == "extension":
+            ext_result = await db.execute(select(SIPExtension).where(SIPExtension.id == change.entity_id))
+            ext = ext_result.scalar_one_or_none()
+            if ext:
+                ext.freeswitch_synced = True
+        applied += 1
 
     await db.commit()
     return CommitResult(tenant_id=tenant_id, applied=applied, failed=failed, errors=errors)

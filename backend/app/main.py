@@ -1,8 +1,17 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
+from app.core.esl import esl_startup, esl_shutdown
 import app.models
-from app.api.v1.endpoints import auth, tenants, extensions, commit, sync, trunks, dids, routes, ivr, voicemail, cdr, e911, provisioning, recordings, fax, sms, security, webhooks, schedules
+from app.api.v1.endpoints import auth, tenants, extensions, commit, sync, trunks, dids, routes, ivr, voicemail, cdr, e911, provisioning, recordings, fax, sms, security, webhooks, schedules, esl, xml_curl, audit
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await esl_startup()
+    yield
+    await esl_shutdown()
 
 
 app = FastAPI(
@@ -10,6 +19,7 @@ app = FastAPI(
     version="0.1.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -39,6 +49,9 @@ app.include_router(sms.router, prefix="/api/v1/sms", tags=["sms"])
 app.include_router(security.router, prefix="/api/v1/security", tags=["security"])
 app.include_router(webhooks.router, prefix="/api/v1/webhooks", tags=["webhooks"])
 app.include_router(schedules.router, prefix="/api/v1/schedules", tags=["schedules"])
+app.include_router(esl.router, prefix="/api/v1/esl", tags=["esl"])
+app.include_router(xml_curl.router, prefix="/api/v1/xml_curl", tags=["xml_curl"])
+app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
 
 
 @app.get("/api/health")

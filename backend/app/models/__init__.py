@@ -14,3 +14,4 @@ from app.models.sms import SMSConfig, SMSMessage
 from app.models.security import SecurityEvent, ACLRule, FraudRule, BlockedIP
 from app.models.webhook import WebhookEndpoint, WebhookDelivery
 from app.models.schedule import Schedule, ScheduleRule, Holiday
+from app.models.audit_log import AuditLog
