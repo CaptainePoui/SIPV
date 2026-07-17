@@ -11,6 +11,15 @@ export default function ExtensionDetail() {
   const [reg, setReg] = useState(null)
   const [form, setForm] = useState(null)
   const [newPassword, setNewPassword] = useState(null)
+  const [schedules, setSchedules] = useState([])
+
+  const CODECS = [
+    { value: '', label: 'Aucune restriction (défaut profil)' },
+    { value: 'ulaw', label: 'ulaw (G.711u)' },
+    { value: 'alaw', label: 'alaw (G.711a)' },
+    { value: 'g722', label: 'G.722 (HD)' },
+    { value: 'g729', label: 'G.729' },
+  ]
 
   const load = async () => {
     const { data: e } = await api.get(`/extensions/${id}`)
@@ -22,16 +31,20 @@ export default function ExtensionDetail() {
       max_contacts: e.max_contacts,
       record_calls: e.record_calls,
       is_active: e.is_active,
+      codec: e.codec || '',
+      schedule_id: e.schedule_id || '',
     })
 
-    const [t, vms, phones] = await Promise.all([
+    const [t, vms, phones, scheds] = await Promise.all([
       api.get(`/tenants/${e.tenant_id}`),
       api.get(`/voicemail/tenant/${e.tenant_id}`),
       api.get(`/provisioning/tenant/${e.tenant_id}`),
+      api.get(`/schedules/tenant/${e.tenant_id}`),
     ])
     setTenant(t.data)
     setVoicemail(vms.data.find(v => v.extension_id === e.id) || null)
     setPhone(phones.data.find(p => p.extension_id === e.id) || null)
+    setSchedules(scheds.data)
 
     try {
       const { data: r } = await api.get(`/esl/registration/${e.username}`)
@@ -45,7 +58,11 @@ export default function ExtensionDetail() {
 
   const save = async ev => {
     ev.preventDefault()
-    await api.put(`/extensions/${id}`, form)
+    await api.put(`/extensions/${id}`, {
+      ...form,
+      codec: form.codec || null,
+      schedule_id: form.schedule_id || null,
+    })
     load()
   }
 
@@ -120,6 +137,12 @@ export default function ExtensionDetail() {
             <input type="number" min="1" value={form.max_contacts} onChange={e => setForm({ ...form, max_contacts: Number(e.target.value) })} />
           </div>
           <div className="form-group">
+            <label>Codec</label>
+            <select value={form.codec} onChange={e => setForm({ ...form, codec: e.target.value })}>
+              {CODECS.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
+            </select>
+          </div>
+          <div className="form-group">
             <label><input type="checkbox" checked={form.record_calls} onChange={e => setForm({ ...form, record_calls: e.target.checked })} /> Enregistrer les appels</label>
           </div>
           <div className="form-group">
@@ -154,9 +177,30 @@ export default function ExtensionDetail() {
         )}
       </div>
 
-      <div className="card" style={{ marginBottom: '1rem', opacity: 0.6 }}>
+      <div className="card" style={{ marginBottom: '1rem' }}>
         <h3 style={{ marginTop: 0 }}>Horaires</h3>
-        <div className="info-value">À venir — nécessite une décision de modèle (horaire propre à l'extension, distinct des horaires DID/IVR existants). Pas encore implémenté.</div>
+        <div className="form-group">
+          <label>Horaire assigné (renvoi hors-heures)</label>
+          <select
+            value={form.schedule_id}
+            onChange={async e => {
+              const schedule_id = e.target.value || null
+              await api.put(`/extensions/${id}`, { schedule_id })
+              load()
+            }}
+          >
+            <option value="">Aucun — toujours disponible</option>
+            {schedules.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </div>
+        {form.schedule_id && (() => {
+          const s = schedules.find(sc => sc.id === form.schedule_id)
+          return s ? (
+            <div className="info-value">
+              Hors-heures → {s.closed_destination_type || '—'} {s.closed_destination ? `(${s.closed_destination})` : ''}
+            </div>
+          ) : null
+        })()}
       </div>
 
       <div className="card" style={{ opacity: 0.6 }}>

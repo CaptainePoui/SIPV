@@ -424,22 +424,28 @@ Nouvel endpoint backend nécessaire ajouté : GET /api/v1/extensions/{ext_id} (f
 n'existait pas, seule la liste par tenant existait).
 Fichiers : frontend/src/pages/ExtensionDetail.jsx (nouveau), App.jsx (route /extensions/:id),
 TenantDetail.jsx (lien cliquable sur le numéro d'extension), extensions.py (2 endpoints ajoutés).
-Écarts vs plan — volontairement PAS fait, pour éviter d'inventer des champs sans confirmation :
-- Codec (ulaw/alaw/g722/g729) : n'existe PAS sur SIPExtension actuellement. Pas ajouté —
-  à proposer séparément si le besoin est confirmé.
-- Horaires par extension : n'existe pas de lien Schedule↔SIPExtension — Schedule est
-  actuellement pensé pour le routage DID/IVR (tenant-level), pas par poste. Section UI
-  présente mais marquée "à venir", nécessite une décision de modèle avant de coder.
-- Lien ERPCRM (contact lié, sync nom) : dépend de TASK-S022, non fait — section UI
-  présente mais marquée "à venir".
-- DND / appels en cours en direct : pas d'endpoint ESL pour ça actuellement (juste
-  sofia_contact pour la registration) — pas fait.
-- Voicemail et Provisioning sont en lecture seule ici (édition déjà possible via
-  VoicemailPage.jsx / ProvisioningPage.jsx existantes) — pas dupliqué le formulaire d'édition.
-Build frontend vérifié (`npm run build` OK), syntax-check Python OK.
-Reste à faire [~] : codec, horaires par extension, lien ERPCRM, statut DND/appels live —
-tous bloqués sur une décision de modèle ou une tâche dépendante, pas des oublis.
-Dépend de : TASK-S020 (statut live ESL) ✓.
+Ajouté ensuite (2026-07-17, sur autorisation explicite — codec et horaires implémentés) :
+- Migration `0017_extension_codec_schedule` : ajoute `codec` (String(10) nullable, null =
+  pas de restriction) et `schedule_id` (UUID nullable, FK schedules.id ON DELETE SET NULL)
+  sur sip_extensions.
+- models/sip.py : champs `codec`, `schedule_id` sur SIPExtension.
+- extensions.py : codec + schedule_id ajoutés à ExtOut/ExtCreate/ExtUpdate/_out/_snapshot.
+  Horaires réutilise le Schedule existant (TASK-S016) — pas de nouveau modèle, pas de
+  "destination renvoi hors-heures" dupliquée (déjà sur Schedule.closed_destination).
+- xml_curl.py : `_user_xml()` émet la variable FreeSWITCH `absolute_codec_string`
+  (mapping ulaw→PCMU, alaw→PCMA, g722→G722, g729→G729) seulement si `ext.codec` est défini —
+  comportement inchangé pour les extensions existantes (codec=null par défaut).
+- ExtensionDetail.jsx : select codec dans Infos SIP ; section Horaires devenue fonctionnelle
+  (choix d'un Schedule du tenant, affiche la destination hors-heures du schedule sélectionné).
+Toujours non fait, hors scope de cette session :
+- Lien ERPCRM (contact lié, sync nom) : dépend de TASK-S022 (bloqué sur l'auth ERPCRM,
+  discussion en cours avec l'utilisateur) — section UI présente, marquée "à venir".
+- DND / appels en cours en direct : pas juste un champ, nécessite de nouvelles méthodes
+  ESLClient (ex: `show channels`) — plus gros que l'ajout d'un champ, pas fait ici.
+- Voicemail et Provisioning restent en lecture seule sur cette page (édition déjà possible
+  via VoicemailPage.jsx / ProvisioningPage.jsx) — pas dupliqué le formulaire.
+Build frontend vérifié (`npm run build` OK) après chaque ajout, syntax-check Python OK.
+Dépend de : TASK-S020 (statut live ESL) ✓, TASK-S016 (schedules, réutilisé) ✓.
 
 #### TASK-S018.1 [ ] Fiche DID unifiée
 Tout ce qui touche un DID = sur une seule page :

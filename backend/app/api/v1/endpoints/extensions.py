@@ -29,6 +29,8 @@ class ExtOut(BaseModel):
     record_calls: bool
     max_contacts: int
     is_active: bool
+    codec: str | None
+    schedule_id: uuid.UUID | None
     freeswitch_synced: bool
     created_at: datetime
 
@@ -41,6 +43,8 @@ class ExtCreate(BaseModel):
     caller_id_number: str | None = None
     record_calls: bool = False
     max_contacts: int = 3
+    codec: str | None = None
+    schedule_id: uuid.UUID | None = None
     password: str | None = None  # auto-generated if not provided
 
 class ExtUpdate(BaseModel):
@@ -52,6 +56,8 @@ class ExtUpdate(BaseModel):
     record_calls: bool | None = None
     max_contacts: int | None = None
     is_active: bool | None = None
+    codec: str | None = None
+    schedule_id: uuid.UUID | None = None
     password: str | None = None
 
 
@@ -61,7 +67,8 @@ def _out(e: SIPExtension) -> ExtOut:
         username=e.username, voicemail_enabled=e.voicemail_enabled, voicemail_email=e.voicemail_email,
         caller_id_name=e.caller_id_name, caller_id_number=e.caller_id_number,
         record_calls=e.record_calls, max_contacts=e.max_contacts,
-        is_active=e.is_active, freeswitch_synced=e.freeswitch_synced, created_at=e.created_at,
+        is_active=e.is_active, codec=e.codec, schedule_id=e.schedule_id,
+        freeswitch_synced=e.freeswitch_synced, created_at=e.created_at,
     )
 
 
@@ -78,6 +85,8 @@ def _snapshot(e: SIPExtension) -> dict:
         "record_calls": e.record_calls,
         "max_contacts": e.max_contacts,
         "is_active": e.is_active,
+        "codec": e.codec,
+        "schedule_id": str(e.schedule_id) if e.schedule_id else None,
     }
 
 
@@ -118,6 +127,7 @@ async def create_extension(
         voicemail_enabled=payload.voicemail_enabled, voicemail_email=payload.voicemail_email,
         caller_id_name=payload.caller_id_name, caller_id_number=payload.caller_id_number,
         record_calls=payload.record_calls, max_contacts=payload.max_contacts,
+        codec=payload.codec, schedule_id=payload.schedule_id,
     )
     db.add(ext)
     change = PendingChange(

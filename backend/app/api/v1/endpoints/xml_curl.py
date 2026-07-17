@@ -130,11 +130,18 @@ async def _handle_directory(form, db: AsyncSession) -> Response:
     return _resp(_directory_full_domain(tenant, extensions))
 
 
+_CODEC_MAP = {"ulaw": "PCMU", "alaw": "PCMA", "g722": "G722", "g729": "G729"}
+
+
 def _user_xml(ext: "SIPExtension", domain: str) -> str:
     cid_name = xe(ext.caller_id_name or ext.name)
     cid_num = xe(ext.caller_id_number or ext.extension)
     context = xe(_context_name(domain))
     vm = "true" if ext.voicemail_enabled else "false"
+    codec_var = ""
+    fs_codec = _CODEC_MAP.get(ext.codec)
+    if fs_codec:
+        codec_var = f'\n                <variable name="absolute_codec_string" value="{fs_codec}"/>'
     return f"""            <user id="{xe(ext.username)}">
               <params>
                 <param name="password" value="{xe(ext.password)}"/>
@@ -147,7 +154,7 @@ def _user_xml(ext: "SIPExtension", domain: str) -> str:
                 <variable name="outbound_caller_id_number" value="{cid_num}"/>
                 <variable name="voicemail_enabled" value="{vm}"/>
                 <variable name="accountcode" value="{xe(ext.username)}"/>
-                <variable name="toll_allow" value="domestic,international,local"/>
+                <variable name="toll_allow" value="domestic,international,local"/>{codec_var}
               </variables>
             </user>"""
 
