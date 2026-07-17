@@ -408,16 +408,38 @@ Reste à faire [~] — câbler `log_audit()` dans :
 | TASK-S018.1 | ux did        | Fiche DID unifiée — routage, horaires, destination, E911 sur une seule page     |
 | TASK-S018.2 | ux trunk      | Fiche trunk unifiée — carrier, credentials, failover, statut live               |
 
-#### TASK-S018 [ ] Fiche extension unifiée (style UCM Grandstream)
-Tout ce qui touche une extension = sur une seule page. Onglets ou sections :
-- Infos SIP : username, password, codec (ulaw/alaw/g722/g729)
-- Voicemail : activé/désactivé, email destination, attach MP3, delete après envoi
-- Provisioning : téléphone assigné, modèle Grandstream, adresse MAC
-- Horaires : disponibilité, destination renvoi hors-heures
-- Statut live : Registered / Unregistered (via ESL), DND actif, appels en cours
-- Lien ERPCRM : contact lié, lien vers fiche ERPCRM, bouton sync nom
-Fichier cible : frontend/src/pages/ExtensionDetail.jsx (nouveau).
-Dépend de : TASK-S020 (statut live ESL).
+#### TASK-S018 [~] Fiche extension unifiée (style UCM Grandstream)
+Tout ce qui touche une extension = sur une seule page.
+Implémenté (backé par des endpoints existants, aucun champ inventé) :
+- Statut live : Registered/Unregistered via GET /api/v1/esl/registration/{username}
+- Infos SIP : username (lecture seule), régénération mot de passe (nouvel endpoint
+  POST /api/v1/extensions/{ext_id}/regenerate-password — génère server-side via
+  secrets.token_urlsafe, affiché une seule fois côté UI), nom, caller ID, max_contacts,
+  enregistrement d'appels, actif/inactif — PUT /api/v1/extensions/{ext_id}
+- Voicemail : lecture seule (email, notifications, pièce jointe) — trouvé par filtrage
+  client-side de GET /voicemail/tenant/{id} sur extension_id
+- Provisioning : lecture seule (MAC, emplacement, dernière connexion) — filtrage
+  client-side de GET /provisioning/tenant/{id} sur extension_id
+Nouvel endpoint backend nécessaire ajouté : GET /api/v1/extensions/{ext_id} (fetch unitaire —
+n'existait pas, seule la liste par tenant existait).
+Fichiers : frontend/src/pages/ExtensionDetail.jsx (nouveau), App.jsx (route /extensions/:id),
+TenantDetail.jsx (lien cliquable sur le numéro d'extension), extensions.py (2 endpoints ajoutés).
+Écarts vs plan — volontairement PAS fait, pour éviter d'inventer des champs sans confirmation :
+- Codec (ulaw/alaw/g722/g729) : n'existe PAS sur SIPExtension actuellement. Pas ajouté —
+  à proposer séparément si le besoin est confirmé.
+- Horaires par extension : n'existe pas de lien Schedule↔SIPExtension — Schedule est
+  actuellement pensé pour le routage DID/IVR (tenant-level), pas par poste. Section UI
+  présente mais marquée "à venir", nécessite une décision de modèle avant de coder.
+- Lien ERPCRM (contact lié, sync nom) : dépend de TASK-S022, non fait — section UI
+  présente mais marquée "à venir".
+- DND / appels en cours en direct : pas d'endpoint ESL pour ça actuellement (juste
+  sofia_contact pour la registration) — pas fait.
+- Voicemail et Provisioning sont en lecture seule ici (édition déjà possible via
+  VoicemailPage.jsx / ProvisioningPage.jsx existantes) — pas dupliqué le formulaire d'édition.
+Build frontend vérifié (`npm run build` OK), syntax-check Python OK.
+Reste à faire [~] : codec, horaires par extension, lien ERPCRM, statut DND/appels live —
+tous bloqués sur une décision de modèle ou une tâche dépendante, pas des oublis.
+Dépend de : TASK-S020 (statut live ESL) ✓.
 
 #### TASK-S018.1 [ ] Fiche DID unifiée
 Tout ce qui touche un DID = sur une seule page :
@@ -519,20 +541,20 @@ Client reçoit si option activée sur le poste (can_receive_alerts) ou sur le te
 Table cible : SIPAlertConfig (tenant_id, event_type, notify_simpleip, notify_client,
 email, sms_number, webhook_enabled).
 
-#### TASK-S037 [~] Champs contact ERPCRM (nécessaire pour TASK-S022)
-Lien ERPCRM : TASK-016 (partiellement fait).
+#### TASK-S037 [x] Champs contact ERPCRM (nécessaire pour TASK-S022)
+Lien ERPCRM : TASK-016.
 Fait (TASK-016 ERPCRM) :
 - `sipv_sync` bool (défaut false) ajouté sur Contact ✓
 - `phone_other` str nullable ajouté sur Contact ✓
 - Migration ERPCRM : `g8h9i0j1k2l3_add_contact_sipv_fields.py`
 - ContactDetail.jsx : checkbox "Synchroniser avec SIPV" + badge "SIP actif" + champ "Autre numéro" ✓
 - ContactOut/ContactCreate/ContactUpdate mis à jour ✓
-Reste à faire [~] :
-- `extension_number` (poste SIP affiché sur la fiche) — NON fait.
-  Note : le champ `extension` existe déjà sur Contact — vérifier si c'est suffisant ou si `extension_number` est distinct.
-- `phone_cell` — NON fait (vérifier si `mobile` existant couvre ce besoin).
-Fichiers concernés : /home/simpleip/erpcrm/backend/app/models/contact.py,
-/home/simpleip/erpcrm/frontend/src/pages/ContactDetail.jsx.
+Vérifié le 2026-07-17 (session SIPV) — les deux points encore ouverts sont déjà couverts :
+- `extension_number` : le champ `extension` existant sur Contact est déjà affiché/éditable
+  dans ContactDetail.jsx sous le label "Poste SIP" (ligne 229) — pas de champ distinct nécessaire.
+- `phone_cell` : le champ `mobile` existant est déjà affiché/éditable sous le label
+  "Cellulaire" (ligne 230) — couvre le besoin.
+Aucun code ajouté (pas de doublon de champ). TASK-S022 n'est plus bloquée sur ce point.
 
 #### TASK-S038 [ ] Health check + sync manuelle + alerte connexion
 Endpoint GET /api/v1/health/erpcrm → SIPV vérifie joignabilité ERPCRM (settings.ERPCRM_HOST).

@@ -87,6 +87,15 @@ async def list_extensions(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_d
     return [_out(e) for e in result.scalars().all()]
 
 
+@router.get("/{ext_id}", response_model=ExtOut)
+async def get_extension(ext_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    result = await db.execute(select(SIPExtension).where(SIPExtension.id == ext_id))
+    ext = result.scalar_one_or_none()
+    if not ext:
+        raise HTTPException(status_code=404, detail="Extension introuvable")
+    return _out(ext)
+
+
 @router.post("/tenant/{tenant_id}", response_model=ExtOut, status_code=status.HTTP_201_CREATED)
 async def create_extension(
     tenant_id: uuid.UUID,
@@ -183,6 +192,47 @@ async def update_extension(
     await db.commit()
     await db.refresh(ext)
     return _out(ext)
+
+
+class RegeneratePasswordOut(BaseModel):
+    id: uuid.UUID
+    password: str
+
+
+@router.post("/{ext_id}/regenerate-password", response_model=RegeneratePasswordOut)
+async def regenerate_password(
+    ext_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Generate a new SIP password server-side (secrets.token_urlsafe, same as extension creation)."""
+    result = await db.execute(select(SIPExtension).where(SIPExtension.id == ext_id))
+    ext = result.scalar_one_or_none()
+    if not ext:
+        raise HTTPException(status_code=404, detail="Extension introuvable")
+
+    old_data = _snapshot(ext)
+    new_password = secrets.token_urlsafe(12)
+    ext.password = new_password
+    ext.freeswitch_synced = False
+    ext.updated_at = datetime.now(timezone.utc)
+
+    change = PendingChange(
+        tenant_id=ext.tenant_id, change_type="update_extension", entity_type="extension",
+        entity_id=str(ext_id), payload={"password_changed": True}, created_by=user.email,
+    )
+    db.add(change)
+    await log_audit(
+        db, request=request, user=user,
+        tenant_id=ext.tenant_id, entity_type="extension", entity_id=str(ext_id),
+        entity_label=f"Poste {ext.extension} — {ext.name}",
+        action="update",
+        old_data=old_data,
+        new_data={**_snapshot(ext), "password_changed": True},
+    )
+    await db.commit()
+    return RegeneratePasswordOut(id=ext.id, password=new_password)
 
 
 @router.delete("/{ext_id}", status_code=status.HTTP_204_NO_CONTENT)

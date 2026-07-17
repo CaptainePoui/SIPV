@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, NavLink } from 'react-router-do
 import api from './services/api'
 import Tenants from './pages/Tenants'
 import TenantDetail from './pages/TenantDetail'
+import ExtensionDetail from './pages/ExtensionDetail'
 import Security from './pages/Security'
 import CDRPage from './pages/CDRPage'
 import IVRPage from './pages/IVRPage'
@@ -84,6 +85,7 @@ function AppRoutes({ onLogout }) {
         <Route path="/" element={<Navigate to="/tenants" replace />} />
         <Route path="/tenants" element={<Tenants />} />
         <Route path="/tenants/:id" element={<TenantDetail />} />
+        <Route path="/extensions/:id" element={<ExtensionDetail />} />
         <Route path="/ivr" element={<IVRPage />} />
         <Route path="/routes" element={<RoutesPage />} />
         <Route path="/voicemail" element={<VoicemailPage />} />

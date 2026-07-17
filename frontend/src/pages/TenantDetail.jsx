@@ -97,7 +97,7 @@ export default function TenantDetail() {
             <tbody>
               {extensions.map(e => (
                 <tr key={e.id}>
-                  <td>{e.extension}</td>
+                  <td><Link to={`/extensions/${e.id}`}>{e.extension}</Link></td>
                   <td>{e.name}</td>
                   <td><code>{e.username}</code></td>
                   <td>{e.voicemail_email || '—'}</td>
