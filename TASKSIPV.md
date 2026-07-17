@@ -470,14 +470,16 @@ statut live (UP/DOWN via ESL sofia status).
 | TASK-S030  | session lock       | Session gestionnaire unique — lock, timeout 30min, blocage user si actif           |
 | TASK-S031  | code temporaire    | Code unique gestionnaire → accès ticket limité sans accès gestion complète         |
 
-#### TASK-S027 [ ] Permissions téléphoniques PortalUser ERPCRM
-Migration Alembic ERPCRM — ajouter champs boolean sur portal_users :
-can_view_own_extension, can_edit_extension_name, can_edit_call_forward,
-can_edit_dnd, can_edit_voicemail, can_view_own_cdr, can_view_voicemail_messages,
-can_receive_alerts, can_manage_telephony, can_manage_ivr, can_manage_groups,
-can_manage_audio_prompts, can_view_company_cdr.
-Validation serveur systématique : même si UI masquée, le backend SIPV refuse si permission absente.
-Fichier modifié : /home/simpleip/erpcrm/backend/app/models/portal.py.
+#### TASK-S027 [x] Permissions téléphoniques PortalUser ERPCRM
+Fait côté ERPCRM (voir TASKERPCRM.md TASK-017 pour le détail complet) — les 13 champs
+boolean existent sur portal_users, avec UI Admin.jsx pour les cocher par accès portail.
+⚠️ Validation serveur systématique pas encore applicable : SIPV n'a aucun endpoint qui
+consomme ces permissions pour l'instant, puisque TASK-S028/S029 (qui liraient ces
+permissions avant d'exposer des données) ne sont pas commencées. La règle "le backend SIPV
+doit toujours revalider, jamais faire confiance à l'UI seule" reste à appliquer quand
+S028/S029 seront codées.
+Fichier modifié : /home/simpleip/erpcrm/backend/app/models/portal.py (+ portal.py endpoints,
++ migration, + Admin.jsx — hors du repo SIPV, voir TASKERPCRM.md).
 
 #### TASK-S028 [ ] Portal "Mon poste"
 Visible si can_view_own_extension = true.
