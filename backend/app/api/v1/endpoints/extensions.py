@@ -56,6 +56,7 @@ class ExtOut(BaseModel):
     max_contacts: int
     is_active: bool
     codec: str | None
+    transport: str
     schedule_id: uuid.UUID | None
     erpcrm_contact_id: uuid.UUID | None
     freeswitch_synced: bool
@@ -71,6 +72,7 @@ class ExtCreate(BaseModel):
     record_calls: bool = False
     max_contacts: int = 3
     codec: str | None = None
+    transport: str = "tls"  # udp, tcp, tls
     schedule_id: uuid.UUID | None = None
     password: str | None = None  # auto-generated if not provided
 
@@ -84,6 +86,7 @@ class ExtUpdate(BaseModel):
     max_contacts: int | None = None
     is_active: bool | None = None
     codec: str | None = None
+    transport: str | None = None
     schedule_id: uuid.UUID | None = None
     password: str | None = None
 
@@ -94,7 +97,7 @@ def _out(e: SIPExtension) -> ExtOut:
         username=e.username, voicemail_enabled=e.voicemail_enabled, voicemail_email=e.voicemail_email,
         caller_id_name=e.caller_id_name, caller_id_number=e.caller_id_number,
         record_calls=e.record_calls, max_contacts=e.max_contacts,
-        is_active=e.is_active, codec=e.codec, schedule_id=e.schedule_id,
+        is_active=e.is_active, codec=e.codec, transport=e.transport, schedule_id=e.schedule_id,
         erpcrm_contact_id=e.erpcrm_contact_id,
         freeswitch_synced=e.freeswitch_synced, created_at=e.created_at,
     )
@@ -114,6 +117,7 @@ def _snapshot(e: SIPExtension) -> dict:
         "max_contacts": e.max_contacts,
         "is_active": e.is_active,
         "codec": e.codec,
+        "transport": e.transport,
         "schedule_id": str(e.schedule_id) if e.schedule_id else None,
     }
 
@@ -170,7 +174,7 @@ async def create_extension(
         voicemail_enabled=payload.voicemail_enabled, voicemail_email=payload.voicemail_email,
         caller_id_name=payload.caller_id_name, caller_id_number=payload.caller_id_number,
         record_calls=payload.record_calls, max_contacts=payload.max_contacts,
-        codec=payload.codec, schedule_id=payload.schedule_id,
+        codec=payload.codec, transport=payload.transport, schedule_id=payload.schedule_id,
     )
     db.add(ext)
     change = PendingChange(

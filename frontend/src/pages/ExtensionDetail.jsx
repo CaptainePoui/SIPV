@@ -23,6 +23,12 @@ export default function ExtensionDetail() {
     { value: 'g729', label: 'G.729' },
   ]
 
+  const TRANSPORTS = [
+    { value: 'tls', label: 'TLS (recommandé, chiffré)' },
+    { value: 'tcp', label: 'TCP' },
+    { value: 'udp', label: 'UDP' },
+  ]
+
   const load = async () => {
     const { data: e } = await api.get(`/extensions/${id}`)
     setExt(e)
@@ -34,6 +40,7 @@ export default function ExtensionDetail() {
       record_calls: e.record_calls,
       is_active: e.is_active,
       codec: e.codec || '',
+      transport: e.transport || 'tls',
       schedule_id: e.schedule_id || '',
     })
 
@@ -147,6 +154,12 @@ export default function ExtensionDetail() {
             <label>Codec</label>
             <select value={form.codec} onChange={e => setForm({ ...form, codec: e.target.value })}>
               {CODECS.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
+            </select>
+          </div>
+          <div className="form-group">
+            <label>Transport SIP</label>
+            <select value={form.transport} onChange={e => setForm({ ...form, transport: e.target.value })}>
+              {TRANSPORTS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
             </select>
           </div>
           <div className="form-group">
