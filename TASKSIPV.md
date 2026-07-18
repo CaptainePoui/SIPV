@@ -350,6 +350,7 @@ Fichiers : models/pending_change.py, api/v1/endpoints/commit.py.
 |-------------|-------------------|--------------------------------------------------------------------------------------|
 | TASK-S017.1 | commit freeswitch | Réécrire commit/sync pour FreeSWITCH — remplacer logique Asterisk par ESL + xml_curl|
 | TASK-S020   | esl               | Connexion ESL depuis FastAPI — surveiller appels live, envoyer commandes FreeSWITCH ✓|
+| TASK-S020.1 | esl ip nat        | IP publique/privée par registration — diagnostic NAT/SIP ALG ✓                       |
 | TASK-S021   | mod_xml_curl      | Endpoint FastAPI servant directory XML + dialplan XML à FreeSWITCH (multi-tenant)    |
 
 #### TASK-S017.1 [~] Commit/sync FreeSWITCH
@@ -400,6 +401,23 @@ GET /api/v1/esl/registration/{username}, DELETE /api/v1/esl/calls/{uuid}.
    Fix  : remplacer `\d` par `[0-9]`
 Écart vs plan : greenswitch mentionné comme "lib cible" — non utilisé, asyncio natif choisi
 (aucune dépendance pip supplémentaire).
+
+#### TASK-S020.1 [x] IP publique/privée sur les registrations (diagnostic NAT/SIP ALG)
+Demande de l'utilisateur : afficher l'IP publique ET l'IP privée de chaque poste
+enregistré côté ERPCRM (fiche compagnie), comme dans ScopServ — sert à diagnostiquer
+si le SIP ALG est actif ou s'il y a un double NAT chez le client (les deux IP
+identiques = ALG actif ou double NAT).
+Fait :
+- `_parse_registrations(raw)` dans `esl.py` : parse `show registrations as json`,
+  extrait `network_ip` (IP publique réelle vue par FreeSWITCH, fiable) et l'IP dans
+  le champ `url` du Contact SIP via regex `@([0-9a-fA-F:.]+):` (IP annoncée par le
+  poste lui-même, souvent l'IP LAN).
+- `RegistrationOut` : ajout `public_ip`, `private_ip`, `port`.
+- `tenant_registrations()` réécrit pour appeler `show_registrations()` une seule fois
+  pour tout le tenant (au lieu d'un appel `sofia_contact()` par extension) puis
+  matcher par username — plus rapide, moins d'appels ESL.
+Fichiers : backend/app/api/v1/endpoints/esl.py.
+Consommé côté ERPCRM par TASK-023.1 (voir TASKERPCRM.md).
 
 #### TASK-S021 [x] mod_xml_curl endpoint
 FreeSWITCH appelle FastAPI pour obtenir sa config XML dynamiquement à chaque registration/appel.
