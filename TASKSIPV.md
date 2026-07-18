@@ -323,15 +323,34 @@ envoie `section=` dans le body, un seul handler lit le champ et dispatch.
 | TASK-S025  | sync order       | Sync queue ordonné par dépendances (contacts→extensions→...→facturation)             |
 | TASK-S026  | audit trail      | [~] Infrastructure audit complète — câblage partiel (extensions seulement)           |
 
-#### TASK-S022 [ ] Lien extension ↔ contact ERPCRM
-Ajouter erpcrm_contact_id (UUID nullable) sur SIPExtension (migration Alembic).
-Flux création extension dans SIPV :
-1. Chercher contact ERPCRM via GET {ERPCRM_HOST}/api/v1/contacts?search={name}
-2. Si trouvé → PATCH /contacts/{id} pour cocher sipv_sync=true + enregistrer erpcrm_contact_id
-3. Si non trouvé → POST /contacts pour créer avec sipv_sync=true, récupérer l'ID créé
-Flux suppression extension : appeler ERPCRM PATCH /contacts/{id} pour décocher sipv_sync.
-Flux changement nom contact ERPCRM → webhook ERPCRM→SIPV → mise à jour caller_id_name + freeswitch_synced=false (re-sync à planifier).
-Dépend de : TASK-S037 (champs sipv_sync + extension_number sur Contact ERPCRM).
+#### TASK-S022 [~] Lien extension ↔ contact ERPCRM
+Correction sur la doc précédente : `ERPCRM_API_KEY` dans sipv/.env est la clé que SIPV
+VALIDE quand ERPCRM l'appelle (direction ERPCRM→SIPV, /sync/company). La clé que SIPV
+PRÉSENTE à ERPCRM (direction SIPV→ERPCRM) est `SIPV_API_KEY` — deux clés distinctes,
+une par sens, ajoutée à config.py + .env des deux côtés (2026-07-18).
+
+Fait :
+- Migration `0018_extension_erpcrm_contact_id` : `erpcrm_contact_id` (UUID nullable, pas
+  de FK cross-DB — ERPCRM et SIPV ont des bases séparées) sur sip_extensions
+- `core/erpcrm_client.py` (nouveau) : client httpx — search_contact (GET ?search=),
+  create_contact (POST), update_contact (PUT), tous avec header X-Api-Key: SIPV_API_KEY
+- `extensions.py` : `_link_erpcrm_contact()` appelée après création d'une extension —
+  cherche par nom, lie si trouvé (PUT sipv_sync=true + extension), crée sinon (POST).
+  Best-effort : si ERPCRM injoignable, l'extension est quand même créée, juste sans lien
+  (logué en warning, pas d'exception qui bloque la création du poste)
+- `delete_extension` : si erpcrm_contact_id existait, PUT sipv_sync=false sur ERPCRM
+  (best-effort, même logique)
+- `sync.py` : nouvel endpoint POST /api/v1/sync/erpcrm-event (X-Api-Key, symétrique à
+  POST /api/v1/sipv/event côté ERPCRM) — action contact_name_changed, cherche les
+  SIPExtension par erpcrm_contact_id, met à jour caller_id_name + freeswitch_synced=false
+Syntax-check Python OK sur tous les fichiers touchés.
+Reste à faire [~] :
+- Pas déployé sur le serveur réel (192.168.1.55) — migrations 0015 à 0018 jamais
+  appliquées là-bas, donc rien de tout ça n'est fonctionnel en vrai pour l'instant
+- ERPCRM ne fait pas l'inverse (rien n'appelle POST /api/v1/sync/erpcrm-event quand un
+  contact change de nom côté ERPCRM — pas fait, pas demandé explicitement ici)
+- Pas de test end-to-end réel (nécessite les deux serveurs up avec les clés configurées)
+Dépend de : TASK-S037 ✓, TASKERPCRM TASK-018 ✓.
 Fichiers modifiés : models/sip.py, api/v1/endpoints/extensions.py.
 
 #### TASK-S023 [ ] Sync states étendus
@@ -438,8 +457,9 @@ Ajouté ensuite (2026-07-17, sur autorisation explicite — codec et horaires im
 - ExtensionDetail.jsx : select codec dans Infos SIP ; section Horaires devenue fonctionnelle
   (choix d'un Schedule du tenant, affiche la destination hors-heures du schedule sélectionné).
 Toujours non fait, hors scope de cette session :
-- Lien ERPCRM (contact lié, sync nom) : dépend de TASK-S022 (bloqué sur l'auth ERPCRM,
-  discussion en cours avec l'utilisateur) — section UI présente, marquée "à venir".
+- Lien ERPCRM (contact lié, sync nom) : TASK-S022 codée (2026-07-18) mais pas déployée —
+  section UI de ExtensionDetail.jsx toujours marquée "à venir", pas encore câblée sur
+  erpcrm_contact_id (fait dans une session séparée, pas cette page).
 - DND / appels en cours en direct : pas juste un champ, nécessite de nouvelles méthodes
   ESLClient (ex: `show channels`) — plus gros que l'ajout d'un champ, pas fait ici.
 - Voicemail et Provisioning restent en lecture seule sur cette page (édition déjà possible

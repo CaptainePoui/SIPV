@@ -9,7 +9,8 @@ class Settings(BaseSettings):
     SIPV_HOST: str = "192.168.1.55"
     ERPCRM_HOST: str = "192.168.1.9"
     ERPCRM_API_URL: str = "http://192.168.1.9:8010"
-    ERPCRM_API_KEY: str = ""
+    ERPCRM_API_KEY: str = ""  # cle que ERPCRM doit presenter en X-Api-Key pour appeler SIPV (/sync/company)
+    SIPV_API_KEY: str = ""  # cle que SIPV doit presenter en X-Api-Key pour appeler ERPCRM (/contacts, /sipv/event)
     # FreeSWITCH ESL (Event Socket Library)
     FREESWITCH_HOST: str = "127.0.0.1"
     FREESWITCH_ESL_PORT: int = 8021

@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.config import settings
 from app.models.tenant import Tenant
+from app.models.sip import SIPExtension
 
 router = APIRouter()
 
@@ -80,3 +81,36 @@ async def sync_status(db: AsyncSession = Depends(get_db), _: str = Depends(verif
     result = await db.execute(select(Tenant))
     count = len(result.scalars().all())
     return {"status": "ok", "tenant_count": count, "project": "SIPV"}
+
+
+class ERPCRMEvent(BaseModel):
+    action: str  # contact_name_changed
+    erpcrm_contact_id: uuid.UUID
+    data: dict = {}
+
+
+@router.post("/erpcrm-event")
+async def erpcrm_event(payload: ERPCRMEvent, db: AsyncSession = Depends(get_db), _: str = Depends(verify_api_key)):
+    """
+    Appele par ERPCRM quand un contact lie a une extension change (TASK-S022).
+    Symetrique de POST /api/v1/sipv/event cote ERPCRM.
+    """
+    result = await db.execute(select(SIPExtension).where(SIPExtension.erpcrm_contact_id == payload.erpcrm_contact_id))
+    extensions = result.scalars().all()
+    if not extensions:
+        raise HTTPException(status_code=404, detail="Aucune extension liee a ce contact")
+
+    if payload.action != "contact_name_changed":
+        raise HTTPException(status_code=400, detail=f"Action inconnue : {payload.action}")
+
+    updated = []
+    for ext in extensions:
+        first = payload.data.get("first_name")
+        last = payload.data.get("last_name")
+        if first or last:
+            ext.caller_id_name = f"{first or ''} {last or ''}".strip()
+        ext.freeswitch_synced = False
+        updated.append(ext.username)
+
+    await db.commit()
+    return {"status": "ok", "updated_extensions": updated}

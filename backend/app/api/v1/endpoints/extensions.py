@@ -1,12 +1,15 @@
+import logging
 import uuid
 import secrets
 from datetime import datetime, timezone
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.audit import log_audit
+from app.core import erpcrm_client
 from app.api.v1.endpoints.auth import get_current_user
 from app.models.sip import SIPExtension
 from app.models.tenant import Tenant
@@ -14,6 +17,28 @@ from app.models.pending_change import PendingChange
 from app.models.user import User
 
 router = APIRouter()
+logger = logging.getLogger("extensions")
+
+
+async def _link_erpcrm_contact(ext: SIPExtension) -> uuid.UUID | None:
+    """
+    Cherche/cree/lie le contact ERPCRM correspondant a cette extension (TASK-S022).
+    Best-effort : si ERPCRM est injoignable, l'extension reste creee sans lien —
+    le lien pourra etre refait plus tard (pas bloquant pour la creation du poste).
+    """
+    parts = ext.name.split(maxsplit=1)
+    first_name = parts[0] if parts else ext.name
+    last_name = parts[1] if len(parts) > 1 else ""
+    try:
+        contact = await erpcrm_client.search_contact(ext.name)
+        if contact:
+            await erpcrm_client.update_contact(contact["id"], sipv_sync=True, extension=ext.extension)
+            return uuid.UUID(contact["id"])
+        contact = await erpcrm_client.create_contact(first_name, last_name, ext.extension)
+        return uuid.UUID(contact["id"])
+    except (httpx.HTTPError, KeyError, ValueError) as e:
+        logger.warning("Lien ERPCRM echoue pour extension %s: %s", ext.username, e)
+        return None
 
 
 class ExtOut(BaseModel):
@@ -31,6 +56,7 @@ class ExtOut(BaseModel):
     is_active: bool
     codec: str | None
     schedule_id: uuid.UUID | None
+    erpcrm_contact_id: uuid.UUID | None
     freeswitch_synced: bool
     created_at: datetime
 
@@ -68,6 +94,7 @@ def _out(e: SIPExtension) -> ExtOut:
         caller_id_name=e.caller_id_name, caller_id_number=e.caller_id_number,
         record_calls=e.record_calls, max_contacts=e.max_contacts,
         is_active=e.is_active, codec=e.codec, schedule_id=e.schedule_id,
+        erpcrm_contact_id=e.erpcrm_contact_id,
         freeswitch_synced=e.freeswitch_synced, created_at=e.created_at,
     )
 
@@ -152,6 +179,13 @@ async def create_extension(
     )
     await db.commit()
     await db.refresh(ext)
+
+    erpcrm_contact_id = await _link_erpcrm_contact(ext)
+    if erpcrm_contact_id:
+        ext.erpcrm_contact_id = erpcrm_contact_id
+        await db.commit()
+        await db.refresh(ext)
+
     return _out(ext)
 
 
@@ -258,6 +292,7 @@ async def delete_extension(
         raise HTTPException(status_code=404, detail="Extension introuvable")
 
     old_data = _snapshot(ext)
+    erpcrm_contact_id = ext.erpcrm_contact_id
 
     change = PendingChange(
         tenant_id=ext.tenant_id, change_type="remove_extension", entity_type="extension",
@@ -275,4 +310,10 @@ async def delete_extension(
         new_data=None,
     )
     await db.delete(ext)
+
+    if erpcrm_contact_id:
+        try:
+            await erpcrm_client.update_contact(str(erpcrm_contact_id), sipv_sync=False)
+        except httpx.HTTPError as e:
+            logger.warning("Decochage sipv_sync ERPCRM echoue pour contact %s: %s", erpcrm_contact_id, e)
     await db.commit()

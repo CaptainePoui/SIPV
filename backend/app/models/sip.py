@@ -31,6 +31,8 @@ class SIPExtension(Base):
     codec: Mapped[str | None] = mapped_column(String(10))  # ulaw, alaw, g722, g729
     # Horaires — reutilise le Schedule existant (TASK-S016), pas de renvoi hors-heures propre a l'extension
     schedule_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("schedules.id", ondelete="SET NULL"))
+    # Lien contact ERPCRM (TASK-S022) — pas de FK cross-DB (ERPCRM et SIPV ont des DB separees)
+    erpcrm_contact_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     # Sync state
     freeswitch_synced: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
