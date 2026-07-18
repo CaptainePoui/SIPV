@@ -60,6 +60,68 @@
   créer le type lui-même (comportement par défaut). Aurait bloqué N'IMPORTE QUEL déploiement
   frais de ce projet — jamais détecté avant car jamais testé de bout en bout.
 
+- **Validation E2E partielle (2026-07-18)** — TASK-S036, première tentative réelle.
+  Tenant test créé (t1001 = Simple IP inc., via le nouveau checkbox ERPCRM TASK-022),
+  2 extensions test créées (100, 101). Chaîne de bugs trouvés et corrigés dans l'ordre :
+
+  1. **Pare-feu SIPV bloquait port 8020** — INPUT policy DROP, seul `lo` autorisé, rien
+     n'ouvrait 8020 pour ERPCRM (192.168.1.9). Ni `/sync/company` ni le nouveau lien
+     contacts n'ont JAMAIS pu fonctionner à travers le réseau avant ce fix.
+     Fix : `iptables -A INPUT -p tcp -s 192.168.1.9 --dport 8020 -j ACCEPT` + persisté
+     (`netfilter-persistent save`).
+  2. **bcrypt 5.0.0 incompatible avec passlib 1.7.4** — `hash_password()`/`verify_password()`
+     plantent (bug connu, passlib jamais mis à jour pour bcrypt>=4.1). Cassait la création
+     de tout compte SIPV (aucun n'existait encore). Fix : `pip install bcrypt==4.0.1`
+     (épinglé dans un futur requirements.txt si un jour créé — actuellement aucun côté SIPV).
+     Même fix appliqué côté ERPCRM par prudence (bug intermittent constaté là aussi,
+     requirements.txt mis à jour, service redémarré).
+  3. **Frontend SIPV : bug de login** — App.jsx postait vers `/auth/token` (form-urlencoded,
+     style OAuth2) alors que le backend n'expose que `POST /auth/login` (JSON). Corrigé.
+     Découverte séparée : le frontend admin SIPV (dist/) n'est de toute façon PAS déployé
+     sur le serveur (pas de nginx, pas de service) — testé uniquement via API/curl pour
+     cette session.
+  4. **mod_xml_curl jamais compilé** — commenté dans modules.conf au moment du build source
+     (`/usr/src/freeswitch-1.10.12`). Toute l'architecture "FreeSWITCH tire sa config de
+     SIPV" reposait sur un module absent. Compilé depuis les sources déjà présentes
+     (`make && sudo make install` dans `src/mod/xml_int/mod_xml_curl`), ajouté à
+     `modules.conf.xml`, gateway configuré dans `xml_curl.conf.xml`
+     (`http://127.0.0.1:8020/api/v1/xml_curl`, bindings directory|dialplan|configuration).
+  5. **Profils sofia internal + external en collision sur le port 5060** — aucun des deux
+     n'avait de port explicite dans vars.xml, tombaient tous les deux sur le défaut 5060 ;
+     "internal" perdait la course au démarrage et ne bindait jamais. Fix : ports explicites
+     ajoutés (`internal_sip_port=5060`, `external_sip_port=5080`).
+  6. **ACL `apply-inbound-acl=domains` bloquait tout REGISTER** — cette ACL vanilla
+     n'autorise que les IP source déclarées via `cidr=` par utilisateur dans l'annuaire
+     (on n'en déclare aucune) ; `default="deny"` ⇒ tout REGISTER rejeté avant même la
+     vérification du mot de passe. Commentée dans internal.xml.
+  7. **Réglage documenté mais jamais appliqué** — `xml-curl-use-dynamic-hash=false`,
+     mentionné dans le docstring de xml_curl.py comme requis, absent d'internal.xml.
+     Ajouté (impact réel non isolé du point 6, mais gardé par cohérence avec la doc).
+  8. **Le vrai bug applicatif** — FreeSWITCH envoie le username d'auth avec un `@` en
+     suffixe (`t1001-100@`, confirmé via `xml_curl debug_on` + inspection du POST reçu :
+     `'user': 't1001-100@'`). `_handle_directory()` comparait ce username brut contre
+     `SIPExtension.username` ("t1001-100", sans @) → jamais de match → "not found" →
+     403 systématique. Fix : `username = form.get("user", "").split("@")[0]`.
+
+  **Résultat validé avec `baresip`** (`sipsak` a un bug propre de formatage du digest qui
+  masquait le succès réel — les deux comptes échouaient aussi avec sipsak même après le
+  fix #8, mais baresip confirme que ça fonctionne) :
+  - ✅ **Enregistrement SIP fonctionnel** : les 2 extensions test s'enregistrent avec
+    200 OK, confirmé aussi via `sofia status profile internal reg` (contacts visibles,
+    reachable).
+  - ❌ **Appel interne entre postes : 480 Temporarily Unavailable**. Cause identifiée
+    précisément (log `mod_dialplan_xml.c`) : l'appel est routé dans le contexte **"public"**
+    (défaut du profil) au lieu de **"internal-t1001"** — la variable `user_context` qu'on
+    place dans l'annuaire par utilisateur n'est pas appliquée au canal appelant au moment
+    de l'INVITE. Pas encore corrigé — nécessite de comprendre pourquoi FreeSWITCH n'applique
+    pas cette variable (le mécanisme standard vanilla FreeSWITCH pour ça n'a pas été
+    identifié avec certitude dans cette session).
+
+  Nettoyage effectué en fin de session : `xml_curl debug_on` désactivé, loglevel remis à
+  warning, fichiers temp `/tmp/*.tmp.xml` supprimés, entrée `/etc/hosts` de test retirée.
+  Comptes de test restants dans la DB (tenant t1001 réutilise la vraie compagnie Simple IP
+  inc., extensions 100/101, user SIPV `test@simpleip.tel`) — pas nettoyés, à décider.
+
 ---
 
 ## Complétées
@@ -631,19 +693,20 @@ Usage facturable (1-800, international, minutes) : remonté depuis CDR (TASK-S00
 |------------|------------|------------------------------------------------------------------------------------------|
 | TASK-S036  | poc e2e    | POC bout en bout — 10 étapes validation premier jalon FreeSWITCH opérationnel            |
 
-#### TASK-S036 [ ] POC bout en bout — premier jalon
+#### TASK-S036 [~] POC bout en bout — premier jalon
 Valide que l'architecture complète fonctionne de bout en bout.
+Voir détail complet dans "Points critiques" en haut du fichier (2026-07-18).
 Étapes dans l'ordre :
-1. Créer compagnie ERPCRM → déclenche création tenant SIPV automatique (sync/company)
-2. Créer contact ERPCRM + cocher sipv_sync → vérifier lien dans SIPV
-3. Créer extension depuis SIPV → vérifier contact ERPCRM mis à jour (sipv_sync coché, extension_number renseigné)
-4. Commit changements → vérifier que mod_xml_curl sert directory.xml correct pour ce tenant
-5. Enregistrer softphone avec credentials extension → vérifier "Registered" via ESL
-6. Appel interne entre deux extensions du même tenant → vérifier CDR créé en DB
-7. Vérifier isolation : extension tenant A ne peut pas joindre extension tenant B
-8. Appel entrant sur DID → IVR → extension → vérifier CDR + routage correct
-9. Portail ERPCRM "Mon poste" → statut live affiché, CDR personnel visible selon permissions
-10. Alerte : interrompre connexion FreeSWITCH → vérifier alerte reçue (courriel/SMS Simple IP)
+1. Créer compagnie ERPCRM → déclenche création tenant SIPV automatique (sync/company) — ✓ fait manuellement (checkbox ERPCRM TASK-022), pas testé via le vrai flux checkbox UI (fait par curl direct)
+2. Créer contact ERPCRM + cocher sipv_sync → vérifier lien dans SIPV — non testé cette session
+3. Créer extension depuis SIPV → vérifier contact ERPCRM mis à jour — non testé (S022 codée mais pas exercée dans ce test)
+4. Commit changements → vérifier que mod_xml_curl sert directory.xml correct pour ce tenant — ✓ confirmé
+5. Enregistrer softphone avec credentials extension → vérifier "Registered" — ✓ confirmé (baresip, 200 OK, visible dans sofia status reg)
+6. Appel interne entre deux extensions du même tenant → vérifier CDR créé en DB — ❌ échoue (480, contexte "public" au lieu de "internal-t1001" — bug ouvert)
+7. Vérifier isolation : extension tenant A ne peut pas joindre extension tenant B — non testé (bloqué par 6)
+8. Appel entrant sur DID → IVR → extension → vérifier CDR + routage correct — non testé
+9. Portail ERPCRM "Mon poste" → statut live affiché, CDR personnel visible selon permissions — non fait (TASK-019 ERPCRM pas codée)
+10. Alerte : interrompre connexion FreeSWITCH → vérifier alerte reçue — non fait (TASK-S034 pas codée)
 Dépend de : TASK-S017.1, TASK-S020, TASK-S021, TASK-S022, TASK-S027, TASK-S028, TASK-S037.
 
 ---

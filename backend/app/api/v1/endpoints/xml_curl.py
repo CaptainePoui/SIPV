@@ -95,7 +95,9 @@ async def _handle_directory(form, db: AsyncSession) -> Response:
       user       = SIP username (= SIPExtension.username)
     """
     domain = form.get("key_value", "") or form.get("domain", "")
-    username = form.get("user", "")
+    # FreeSWITCH envoie parfois le username d'auth avec un "@" (et parfois "@domaine") en
+    # suffixe (ex: "t1001-100@") — on ne garde que la partie avant le "@".
+    username = form.get("user", "").split("@")[0]
 
     # Lookup tenant by account_number (= domain)
     result = await db.execute(

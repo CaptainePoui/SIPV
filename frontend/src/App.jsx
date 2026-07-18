@@ -37,10 +37,7 @@ function Login({ onLogin }) {
     e.preventDefault()
     setError('')
     try {
-      const form = new URLSearchParams()
-      form.append('username', email)
-      form.append('password', password)
-      const { data } = await api.post('/auth/token', form)
+      const { data } = await api.post('/auth/login', { email, password })
       localStorage.setItem('sipv_token', data.access_token)
       onLogin()
     } catch {
