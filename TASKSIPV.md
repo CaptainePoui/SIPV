@@ -207,6 +207,7 @@ Frontend : /home/simpleip/sipv/frontend/src/
 | TASK-S001  | auth              | Auth — Login JWT, get_current_user, sipv_users table                                 |
 | TASK-S002  | tenants sync      | Tenants — liste, détail, création, sync depuis ERPCRM via X-Api-Key                  |
 | TASK-S003  | extensions        | Extensions — CRUD backend, username={account}-{ext}, liste par tenant                |
+| TASK-S003.1| tls postes        | TLS sur profil internal (udp+tcp+tls) + champ transport par poste, defaut tls ✓      |
 | TASK-S004  | trunks            | Trunks — CRUD backend, failover_trunk_id FK auto-référentielle (Simple IP seulement) |
 | TASK-S005  | dids              | DIDs — CRUD backend, destination_type : extension/ivr/queue/voicemail/hangup         |
 | TASK-S006  | routes dialplan   | Routes sortantes (dial_patterns, strip/prepend) + entrantes (DID→destination)        |
@@ -240,6 +241,38 @@ Champs : extension, name, username, password, voicemail_enabled, voicemail_email
 caller_id_name, caller_id_number, record_calls, max_contacts, is_active.
 ⚠️ Champ asterisk_synced = legacy Asterisk → à renommer freeswitch_synced (TASK-S017.1).
 Fichiers : models/sip.py (SIPExtension), api/v1/endpoints/extensions.py.
+
+#### TASK-S003.1 [x] TLS sur le profil internal + champ transport par poste
+Demande de l'utilisateur : connexions sécurisées pour les postes (extensions) —
+trunks reportés en attente de confirmation ISP sur le support TLS. Ensuite :
+garder les 3 transports disponibles (udp/tcp/tls) avec TLS par défaut, pas
+d'exclusivité.
+Fait côté serveur FreeSWITCH (config non versionnée, voir ci-dessous) :
+- `vars.xml` : `internal_ssl_enable=true`, `internal_tls_port=5061`,
+  `sip_tls_version=tlsv1.2`, `sip_tls_ciphers=ALL:!ADH:!LOW:!EXP:!MD5:@STRENGTH`
+- `sip_profiles/internal.xml` : `tls-cert-dir` pointé vers `$${internal_ssl_dir}`
+  (déjà = `$${conf_dir}/tls`)
+- Certificat auto-signé généré dans `/usr/local/freeswitch/conf/tls/`
+  (agent.pem, cafile.pem, dh2048.pem, CN=sipv.simpleip.local, 10 ans).
+  `tls-verify-policy=none` → pas de blocage client sur cert auto-signé.
+  ⚠️ À remplacer par un vrai certificat (Let's Encrypt ou fourni par le client)
+  si des postes se connectent depuis l'extérieur avec vérification stricte.
+- Profil `internal` confirmé actif sur les 3 transports simultanément :
+  UDP+TCP sur 5060, TLS sur 5061 (vérifié via `sofia status profile internal`
+  + `ss -tulnp` + handshake `openssl s_client`).
+- `tls-only=false` (déjà présent) → TLS n'exclut pas UDP/TCP, les 3 coexistent.
+Fait côté application :
+- `SIPExtension.transport` (udp/tcp/tls, défaut `tls`, migration 0019) — champ
+  informatif : FreeSWITCH n'impose pas de transport par utilisateur dans la
+  directory XML, donc ce champ ne bloque rien, il documente/recommande quel
+  transport un poste devrait utiliser pour sa configuration.
+  Exposé dans `ExtOut`/`ExtCreate`/`ExtUpdate`, sélecteur ajouté sur
+  `ExtensionDetail.jsx`. Postes créés par défaut en `tls`.
+Reste à faire : TLS pour les trunks — bloqué en attente de confirmation ISP
+(le fournisseur de lignes SIP doit accepter TLS de son côté).
+Fichiers : models/sip.py, api/v1/endpoints/extensions.py,
+alembic/versions/0019_extension_transport.py, frontend/src/pages/ExtensionDetail.jsx,
++ config serveur (vars.xml, sip_profiles/internal.xml, conf/tls/*).
 
 #### TASK-S004 [x] Trunks
 SIPTrunk model : name, carrier_name, host, username, password, from_domain,
