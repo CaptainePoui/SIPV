@@ -2,6 +2,8 @@
 ESL endpoints — FreeSWITCH status and commands.
 Used by Simple IP admin only (requires internal JWT auth).
 """
+import json
+import re
 import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -25,8 +27,35 @@ class ESLStatusOut(BaseModel):
 
 class RegistrationOut(BaseModel):
     username: str
-    contact: str
     registered: bool
+    public_ip: str | None = None   # IP telle que vue par FreeSWITCH (network_ip) — la vraie IP publique du poste
+    private_ip: str | None = None  # IP annoncee par le poste lui-meme dans son Contact SIP (souvent l'IP LAN)
+    port: str | None = None
+
+
+def _parse_registrations(raw: str) -> dict[str, dict]:
+    """
+    Parse la sortie de 'show registrations as json'.
+    public_ip/private_ip identiques => SIP ALG actif ou double NAT chez le client
+    (diagnostic reseau cote client, pas cote SIPV).
+    """
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    result = {}
+    for row in data.get("rows", []):
+        username = row.get("reg_user", "")
+        if not username:
+            continue
+        url = row.get("url", "")
+        m = re.search(r"@([0-9a-fA-F:.]+):", url)
+        result[username] = {
+            "public_ip": row.get("network_ip"),
+            "private_ip": m.group(1) if m else None,
+            "port": row.get("network_port"),
+        }
+    return result
 
 
 # ── Status ────────────────────────────────────────────────────────────────────
@@ -93,16 +122,20 @@ async def tenant_registrations(
 
     try:
         esl: ESLClient = await get_esl()
+        raw = await esl.show_registrations()
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"ESL error: {exc}")
 
+    regs = _parse_registrations(raw)
     out = []
     for ext in extensions:
-        contact = await esl.sofia_contact("internal", ext.username)
+        reg = regs.get(ext.username)
         out.append(RegistrationOut(
             username=ext.username,
-            contact=contact,
-            registered=bool(contact and "error" not in contact.lower() and contact.strip()),
+            registered=reg is not None,
+            public_ip=reg["public_ip"] if reg else None,
+            private_ip=reg["private_ip"] if reg else None,
+            port=reg["port"] if reg else None,
         ))
     return out
 
