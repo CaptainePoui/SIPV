@@ -16,9 +16,6 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("CREATE TYPE fax_direction_enum AS ENUM ('inbound', 'outbound')")
-    op.execute("CREATE TYPE fax_status_enum AS ENUM ('pending', 'processing', 'delivered', 'failed')")
-
     op.create_table(
         'fax_lines',
         sa.Column('id', sa.UUID(), nullable=False),

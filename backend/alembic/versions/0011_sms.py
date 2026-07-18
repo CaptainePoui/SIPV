@@ -16,10 +16,6 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("CREATE TYPE sms_provider_enum AS ENUM ('twilio', 'bandwidth', 'telnyx', 'sinch', 'vonage', 'other')")
-    op.execute("CREATE TYPE sms_direction_enum AS ENUM ('inbound', 'outbound')")
-    op.execute("CREATE TYPE sms_status_enum AS ENUM ('queued', 'sent', 'delivered', 'failed', 'received')")
-
     op.create_table(
         'sms_configs',
         sa.Column('id', sa.UUID(), nullable=False),

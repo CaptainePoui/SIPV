@@ -47,6 +47,18 @@
 - FusionPBX est installé sur le serveur (DB `fusionpbx`) mais abandonné — référence technique uniquement.
 - Trunks = Simple IP seulement (jamais exposés dans portail client).
 - Portail client = côté ERPCRM (Portal.jsx + PortalUser) — pas dans l'admin SIPV (port 3020).
+- **Déploiement (2026-07-18)** : les 18 migrations Alembic (0001→0018) ont été appliquées pour
+  la première fois sur le serveur réel (192.168.1.55, DB `sipv`) — elle était vide avant ça,
+  aucune migration n'avait jamais tourné malgré du code écrit et documenté [x] depuis des
+  semaines. Backend redémarré (`uvicorn` via nohup/setsid, pas de service systemd — à
+  considérer si des redémarrages serveur doivent survivre). `/api/health` répond OK.
+  ⚠️ Bug trouvé et corrigé dans 0009_recordings.py, 0010_fax.py, 0011_sms.py : chaque
+  migration faisait `op.execute("CREATE TYPE ... AS ENUM")` PUIS utilisait `sa.Enum(...,
+  name=...)` sur une colonne du même create_table — SQLAlchemy recrée le type
+  automatiquement pour toute Enum rencontrée dans un create_table, causant
+  `DuplicateObjectError`. Fix : `op.execute("CREATE TYPE...")` supprimé, laissé sa.Enum
+  créer le type lui-même (comportement par défaut). Aurait bloqué N'IMPORTE QUEL déploiement
+  frais de ce projet — jamais détecté avant car jamais testé de bout en bout.
 
 ---
 

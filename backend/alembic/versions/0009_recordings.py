@@ -16,8 +16,6 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("CREATE TYPE storage_backend_enum AS ENUM ('local', 'dropbox', 'onedrive', 's3')")
-
     op.create_table(
         'recording_policies',
         sa.Column('id', sa.UUID(), nullable=False),
