@@ -28,6 +28,8 @@ export default function ExtensionDetail() {
     { value: 'tcp', label: 'TCP' },
     { value: 'udp', label: 'UDP' },
   ]
+  // Seul le transport choisi est accepté pour ce poste — une tentative de
+  // connexion avec un autre transport est refusée par SIPV (403).
 
   const load = async () => {
     const { data: e } = await api.get(`/extensions/${id}`)
@@ -161,6 +163,7 @@ export default function ExtensionDetail() {
             <select value={form.transport} onChange={e => setForm({ ...form, transport: e.target.value })}>
               {TRANSPORTS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
             </select>
+            <small style={{ color: '#6B7280' }}>Seul ce transport sera accepté pour ce poste — une tentative avec un autre transport sera refusée.</small>
           </div>
           <div className="form-group">
             <label><input type="checkbox" checked={form.record_calls} onChange={e => setForm({ ...form, record_calls: e.target.checked })} /> Enregistrer les appels</label>

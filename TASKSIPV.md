@@ -207,7 +207,7 @@ Frontend : /home/simpleip/sipv/frontend/src/
 | TASK-S001  | auth              | Auth — Login JWT, get_current_user, sipv_users table                                 |
 | TASK-S002  | tenants sync      | Tenants — liste, détail, création, sync depuis ERPCRM via X-Api-Key                  |
 | TASK-S003  | extensions        | Extensions — CRUD backend, username={account}-{ext}, liste par tenant                |
-| TASK-S003.1| tls postes        | TLS sur profil internal (udp+tcp+tls) + champ transport par poste, defaut tls ✓      |
+| TASK-S003.1| tls postes        | TLS sur profil internal + transport impose par poste (udp/tcp/tls choisi, defaut tls) ✓|
 | TASK-S004  | trunks            | Trunks — CRUD backend, failover_trunk_id FK auto-référentielle (Simple IP seulement) |
 | TASK-S005  | dids              | DIDs — CRUD backend, destination_type : extension/ivr/queue/voicemail/hangup         |
 | TASK-S006  | routes dialplan   | Routes sortantes (dial_patterns, strip/prepend) + entrantes (DID→destination)        |
@@ -244,9 +244,10 @@ Fichiers : models/sip.py (SIPExtension), api/v1/endpoints/extensions.py.
 
 #### TASK-S003.1 [x] TLS sur le profil internal + champ transport par poste
 Demande de l'utilisateur : connexions sécurisées pour les postes (extensions) —
-trunks reportés en attente de confirmation ISP sur le support TLS. Ensuite :
-garder les 3 transports disponibles (udp/tcp/tls) avec TLS par défaut, pas
-d'exclusivité.
+trunks reportés en attente de confirmation ISP sur le support TLS. Puis précision :
+les 3 transports (udp/tcp/tls) doivent être disponibles au choix PAR POSTE, avec
+TLS par défaut — le transport choisi doit être imposé (pas juste informatif), une
+tentative de connexion avec un autre transport doit être refusée.
 Fait côté serveur FreeSWITCH (config non versionnée, voir ci-dessous) :
 - `vars.xml` : `internal_ssl_enable=true`, `internal_tls_port=5061`,
   `sip_tls_version=tlsv1.2`, `sip_tls_ciphers=ALL:!ADH:!LOW:!EXP:!MD5:@STRENGTH`
@@ -262,15 +263,23 @@ Fait côté serveur FreeSWITCH (config non versionnée, voir ci-dessous) :
   + `ss -tulnp` + handshake `openssl s_client`).
 - `tls-only=false` (déjà présent) → TLS n'exclut pas UDP/TCP, les 3 coexistent.
 Fait côté application :
-- `SIPExtension.transport` (udp/tcp/tls, défaut `tls`, migration 0019) — champ
-  informatif : FreeSWITCH n'impose pas de transport par utilisateur dans la
-  directory XML, donc ce champ ne bloque rien, il documente/recommande quel
-  transport un poste devrait utiliser pour sa configuration.
-  Exposé dans `ExtOut`/`ExtCreate`/`ExtUpdate`, sélecteur ajouté sur
-  `ExtensionDetail.jsx`. Postes créés par défaut en `tls`.
+- `SIPExtension.transport` (udp/tcp/tls, défaut `tls`, migration 0019) — imposé,
+  pas juste informatif. Exposé dans `ExtOut`/`ExtCreate`/`ExtUpdate`, sélecteur
+  ajouté sur `ExtensionDetail.jsx` avec note explicite. Postes créés par défaut
+  en `tls`.
+- `xml_curl.py` `_handle_directory()` : à chaque REGISTER (`sip_auth_method ==
+  "REGISTER"`), compare le champ `sip_via_protocol` envoyé par FreeSWITCH
+  (udp/tcp/tls — confirmé par test réel avec baresip, présent uniquement lors
+  du sip_auth de REGISTER) au `transport` configuré pour le poste. Si différent
+  → retourne NOT_FOUND (FreeSWITCH répond 403 Forbidden au client). Le check
+  est limité à `sip_auth_method == "REGISTER"` pour ne pas bloquer les lookups
+  internes de la directory faits pour le bridge d'appel (`user/xxx@domain`),
+  qui n'ont pas de `sip_via_protocol`.
+  Validé par test réel : poste en `tls` → REGISTER en UDP refusé (403 Forbidden),
+  REGISTER en TLS accepté (200 OK).
 Reste à faire : TLS pour les trunks — bloqué en attente de confirmation ISP
 (le fournisseur de lignes SIP doit accepter TLS de son côté).
-Fichiers : models/sip.py, api/v1/endpoints/extensions.py,
+Fichiers : models/sip.py, api/v1/endpoints/extensions.py, api/v1/endpoints/xml_curl.py,
 alembic/versions/0019_extension_transport.py, frontend/src/pages/ExtensionDetail.jsx,
 + config serveur (vars.xml, sip_profiles/internal.xml, conf/tls/*).
 

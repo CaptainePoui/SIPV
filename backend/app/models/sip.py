@@ -29,8 +29,8 @@ class SIPExtension(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     # Codec preference — null = pas de restriction (defaults du profil FreeSWITCH)
     codec: Mapped[str | None] = mapped_column(String(10))  # ulaw, alaw, g722, g729
-    # Transport recommande pour ce poste — informatif, n'empeche pas les autres transports
-    # de fonctionner (le profil FreeSWITCH accepte udp/tcp/tls simultanement)
+    # Transport impose pour ce poste — les registrations avec un autre transport sont
+    # refusees (verifie via sip_via_protocol dans xml_curl.py _handle_directory)
     transport: Mapped[str] = mapped_column(String(10), default="tls", server_default="tls")  # udp, tcp, tls
     # Horaires — reutilise le Schedule existant (TASK-S016), pas de renvoi hors-heures propre a l'extension
     schedule_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("schedules.id", ondelete="SET NULL"))

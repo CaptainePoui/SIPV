@@ -123,6 +123,13 @@ async def _handle_directory(form, db: AsyncSession) -> Response:
         ext = result.scalar_one_or_none()
         if not ext:
             return _resp(NOT_FOUND)
+        # Force le transport configure pour ce poste — uniquement verifie au REGISTER
+        # (sip_via_protocol absent lors des lookups internes type "user/xxx@domain" pour
+        # le bridge d'appel, qu'on ne veut pas bloquer).
+        if form.get("sip_auth_method") == "REGISTER":
+            via_protocol = (form.get("sip_via_protocol") or "").lower()
+            if via_protocol and via_protocol != ext.transport:
+                return _resp(NOT_FOUND)
         return _resp(_directory_single_user(tenant, ext))
 
     # No specific user → return full domain with all extensions
