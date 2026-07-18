@@ -291,7 +291,9 @@ async def delete_extension(
     if not ext:
         raise HTTPException(status_code=404, detail="Extension introuvable")
 
-    old_data = _snapshot(ext)
+    # Snapshot de suppression : inclut le mot de passe (contrairement a _snapshot() utilise
+    # pour create/update) pour permettre de recreer le poste a l'identique plus tard.
+    old_data = {**_snapshot(ext), "password": ext.password}
     erpcrm_contact_id = ext.erpcrm_contact_id
 
     change = PendingChange(

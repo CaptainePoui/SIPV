@@ -14,6 +14,7 @@ export default function TenantDetail() {
   const [changes, setChanges] = useState([])
   const [showExtModal, setShowExtModal] = useState(false)
   const [extForm, setExtForm] = useState({ extension: '', name: '', voicemail_email: '' })
+  const [confirmDeleteExt, setConfirmDeleteExt] = useState(null)
 
   const load = async () => {
     const [t, e, tr, d, ch] = await Promise.all([
@@ -51,9 +52,10 @@ export default function TenantDetail() {
     load()
   }
 
-  const deleteExt = async extId => {
-    if (!confirm('Supprimer cette extension?')) return
-    await api.delete(`/extensions/${extId}`)
+  const deleteExt = async () => {
+    if (!confirmDeleteExt) return
+    await api.delete(`/extensions/${confirmDeleteExt.id}`)
+    setConfirmDeleteExt(null)
     load()
   }
 
@@ -102,7 +104,7 @@ export default function TenantDetail() {
                   <td><code>{e.username}</code></td>
                   <td>{e.voicemail_email || '—'}</td>
                   <td><span className={`badge ${e.freeswitch_synced ? 'badge-green' : 'badge-orange'}`}>{e.freeswitch_synced ? 'Oui' : 'En attente'}</span></td>
-                  <td><button className="btn btn-danger btn-sm" onClick={() => deleteExt(e.id)}>Suppr.</button></td>
+                  <td><button className="btn btn-danger btn-sm" onClick={() => setConfirmDeleteExt(e)}>Suppr.</button></td>
                 </tr>
               ))}
             </tbody>
@@ -159,6 +161,27 @@ export default function TenantDetail() {
             ))}
           </tbody>
         </table>
+      )}
+
+      {confirmDeleteExt && (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <h3>Supprimer l'extension {confirmDeleteExt.extension} ?</h3>
+            <p>
+              Poste <strong>{confirmDeleteExt.extension} — {confirmDeleteExt.name}</strong> ({confirmDeleteExt.username}).
+              Cette action est irréversible.
+            </p>
+            <p style={{ fontSize: '.85rem', color: '#6B7280' }}>
+              Le mot de passe SIP actuel sera conservé dans le journal d'audit — si tu dois
+              recréer ce poste plus tard, tu pourras récupérer le même mot de passe via
+              l'historique de l'extension.
+            </p>
+            <div className="modal-footer">
+              <button type="button" className="btn" onClick={() => setConfirmDeleteExt(null)}>Annuler</button>
+              <button type="button" className="btn btn-danger" onClick={deleteExt}>Supprimer</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {showExtModal && (

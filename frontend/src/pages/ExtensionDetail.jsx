@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, Link, useNavigate } from 'react-router-dom'
 import api from '../services/api'
 
 export default function ExtensionDetail() {
   const { id } = useParams()
+  const navigate = useNavigate()
   const [ext, setExt] = useState(null)
   const [tenant, setTenant] = useState(null)
   const [voicemail, setVoicemail] = useState(null)
@@ -12,6 +13,7 @@ export default function ExtensionDetail() {
   const [form, setForm] = useState(null)
   const [newPassword, setNewPassword] = useState(null)
   const [schedules, setSchedules] = useState([])
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
   const CODECS = [
     { value: '', label: 'Aucune restriction (défaut profil)' },
@@ -71,6 +73,11 @@ export default function ExtensionDetail() {
     const { data } = await api.post(`/extensions/${id}/regenerate-password`)
     setNewPassword(data.password)
     load()
+  }
+
+  const deleteExt = async () => {
+    await api.delete(`/extensions/${id}`)
+    navigate(`/tenants/${ext.tenant_id}`)
   }
 
   if (!ext || !form) return <div>Chargement...</div>
@@ -203,10 +210,38 @@ export default function ExtensionDetail() {
         })()}
       </div>
 
-      <div className="card" style={{ opacity: 0.6 }}>
+      <div className="card" style={{ opacity: 0.6, marginBottom: '1rem' }}>
         <h3 style={{ marginTop: 0 }}>Lien ERPCRM</h3>
         <div className="info-value">À venir — dépend de TASK-S022 (lien contact ERPCRM), pas encore implémenté.</div>
       </div>
+
+      <div className="card" style={{ borderColor: '#f5c6cb' }}>
+        <h3 style={{ marginTop: 0 }}>Zone dangereuse</h3>
+        <button type="button" className="btn btn-danger btn-sm" onClick={() => setConfirmDelete(true)}>
+          Supprimer ce poste
+        </button>
+      </div>
+
+      {confirmDelete && (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <h3>Supprimer l'extension {ext.extension} ?</h3>
+            <p>
+              Poste <strong>{ext.extension} — {ext.name}</strong> ({ext.username}).
+              Cette action est irréversible.
+            </p>
+            <p style={{ fontSize: '.85rem', color: '#6B7280' }}>
+              Le mot de passe SIP actuel sera conservé dans le journal d'audit — si tu dois
+              recréer ce poste plus tard, tu pourras récupérer le même mot de passe via
+              l'historique de l'extension.
+            </p>
+            <div className="modal-footer">
+              <button type="button" className="btn" onClick={() => setConfirmDelete(false)}>Annuler</button>
+              <button type="button" className="btn btn-danger" onClick={deleteExt}>Supprimer</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
