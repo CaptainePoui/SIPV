@@ -742,12 +742,12 @@ Voir détail complet dans "Points critiques" en haut du fichier (2026-07-18).
 4. Commit changements → vérifier que mod_xml_curl sert directory.xml correct pour ce tenant — ✓ confirmé
 5. Enregistrer softphone avec credentials extension → vérifier "Registered" — ✓ confirmé (baresip, 200 OK, visible dans sofia status reg)
 6. Appel interne entre deux extensions du même tenant → vérifier CDR créé en DB — ✓ CONFIRMÉ (RTP établi + CDR créé, voir détail dans "Points critiques")
-7. Vérifier isolation : extension tenant A ne peut pas joindre extension tenant B — non testé
+7. Vérifier isolation : extension tenant A ne peut pas joindre extension tenant B — ✓ confirmé (tenant test t9999 temporaire + extension 200, injoignable en composant "200" depuis t1001 → 486 Busy Here, comme attendu ; tenant/extension/contact de test supprimés après verification)
 8. Appel entrant sur DID → IVR → extension → vérifier CDR + routage correct — non testé (explicitement reporté par l'utilisateur — trunk/appels externes = plus tard)
 9. Portail ERPCRM "Mon poste" → statut live affiché, CDR personnel visible selon permissions — non fait (TASK-019 ERPCRM pas codée)
 10. Alerte : interrompre connexion FreeSWITCH → vérifier alerte reçue — non fait (TASK-S034 pas codée)
 Dépend de : TASK-S017.1, TASK-S020, TASK-S021, TASK-S022, TASK-S027, TASK-S028, TASK-S037.
-Reste à faire pour clore complètement cette tâche : étapes 7, 8, 9, 10 ci-dessus.
+Reste à faire pour clore complètement cette tâche : étapes 8, 9, 10 ci-dessus (8 = explicitement reporté par l'utilisateur, 9/10 = fonctionnalités pas encore codées).
 
 ---
 
