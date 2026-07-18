@@ -103,24 +103,63 @@
      `SIPExtension.username` ("t1001-100", sans @) → jamais de match → "not found" →
      403 systématique. Fix : `username = form.get("user", "").split("@")[0]`.
 
-  **Résultat validé avec `baresip`** (`sipsak` a un bug propre de formatage du digest qui
-  masquait le succès réel — les deux comptes échouaient aussi avec sipsak même après le
-  fix #8, mais baresip confirme que ça fonctionne) :
-  - ✅ **Enregistrement SIP fonctionnel** : les 2 extensions test s'enregistrent avec
-    200 OK, confirmé aussi via `sofia status profile internal reg` (contacts visibles,
-    reachable).
-  - ❌ **Appel interne entre postes : 480 Temporarily Unavailable**. Cause identifiée
-    précisément (log `mod_dialplan_xml.c`) : l'appel est routé dans le contexte **"public"**
-    (défaut du profil) au lieu de **"internal-t1001"** — la variable `user_context` qu'on
-    place dans l'annuaire par utilisateur n'est pas appliquée au canal appelant au moment
-    de l'INVITE. Pas encore corrigé — nécessite de comprendre pourquoi FreeSWITCH n'applique
-    pas cette variable (le mécanisme standard vanilla FreeSWITCH pour ça n'a pas été
-    identifié avec certitude dans cette session).
+  **Résultat final — TOUT VALIDÉ** (`sipsak` a un bug propre de formatage du digest qui
+  masquait le succès réel ; `baresip`, deux instances séparées = deux "vrais" postes
+  indépendants, confirme que tout fonctionne) :
+  - ✅ **Enregistrement SIP** : les 2 extensions s'enregistrent avec 200 OK
+    (`sofia status profile internal reg` confirme les contacts).
+  - ✅ **Appel interne entre postes** : connecté, RTP établi
+    (`stream: incoming rtp for 'audio' established`).
+  - ✅ **CDR créé en DB** après l'appel (`src=t1001-100, dst=101, direction=inbound,
+    disposition=ORIGINATOR_CANCEL` sur le test avec raccrochage manuel).
 
-  Nettoyage effectué en fin de session : `xml_curl debug_on` désactivé, loglevel remis à
-  warning, fichiers temp `/tmp/*.tmp.xml` supprimés, entrée `/etc/hosts` de test retirée.
-  Comptes de test restants dans la DB (tenant t1001 réutilise la vraie compagnie Simple IP
-  inc., extensions 100/101, user SIPV `test@simpleip.tel`) — pas nettoyés, à décider.
+  4 bugs supplémentaires trouvés et corrigés pour arriver à l'appel qui fonctionne
+  (au-delà des 8 premiers listés plus haut pour l'enregistrement) :
+
+  9. **`_handle_dialplan` lisait des noms de champs qui n'existent jamais en pratique**
+     (`context`, `destination_number`) — un vrai lookup dialplan FreeSWITCH
+     (`mod_dialplan_xml`) envoie un événement complet avec `Caller-Context`,
+     `Caller-Destination-Number`, `variable_sip_from_host`, etc. (confirmé par capture
+     réelle). Le code n'avait jamais reçu les bonnes données, même avant cette session —
+     jamais testé en vrai avant.
+  10. **Contexte "public" du profil "internal" entrait en collision avec le fichier
+      statique `dialplan/public.xml`** (vanilla FreeSWITCH, prioritaire sur mod_xml_curl).
+      Fix : nouveau contexte dédié `sipv-internal` sur le profil (au lieu de "public"),
+      qui ne collisionne avec aucun fichier statique — force TOUJOURS le passage par
+      notre backend. Le tenant est déterminé au début du routage via le domaine
+      d'origine de l'appelant (`variable_sip_from_host`), pas via `user_context`
+      (qui ne se propage pas de façon fiable au canal appelant — jamais élucidé
+      pourquoi, contourné plutôt que résolu).
+  11. **Le XML `<context name="...">` retourné doit matcher EXACTEMENT le contexte
+      demandé** (`Caller-Context`) — FreeSWITCH rejette sinon la réponse comme
+      "not found" même si elle contient un dialplan par ailleurs valide. `_dialplan_internal`
+      prend maintenant un paramètre `requested_context` pour ça.
+  12. **`_bridge()` utilisait `sofia/internal/user@domain`** où `domain` = notre tenant
+      (ex: "t1001") — FreeSWITCH tentait de RÉSOUDRE "t1001" comme un nom DNS
+      (`503 DNS Error` systématique), au lieu d'utiliser l'enregistrement existant
+      (confirmé fonctionnel via `sofia_contact`). Fix : `user/user@domain`, qui passe
+      par le `dial-string` du domaine (déjà présent dans notre XML directory depuis le
+      début, jamais utilisé). C'est exactement l'indice donné par l'utilisateur
+      ("mon serveur actuel vérifie si c'est interne au début du routage").
+  13. **`mod_xml_cdr` n'avait jamais d'URL configurée** (POST désactivé par défaut) et
+      **aucun endpoint n'existait pour recevoir les CDR** — jamais géré depuis le début
+      du projet. Nouveau `POST /api/v1/cdr/ingest` (parse le XML de mod_xml_cdr,
+      cherche le tenant via `sip_from_host`, insère en DB). `xml_cdr.conf.xml` configuré
+      (`url` + `encode=textxml` pour un parsing XML direct côté SIPV).
+
+  **Changement d'infrastructure durable** : `sipv-backend` tournait en `nohup`/`setsid`
+  manuel (pas fiable — mourait souvent entre deux commandes SSH pendant cette session).
+  Remplacé par un vrai service systemd (`/etc/systemd/system/sipv-backend.service`,
+  `enable --now`, `Restart=on-failure`) — survit maintenant à un reboot serveur et aux
+  redémarrages nécessaires pour appliquer du nouveau code.
+
+  Nettoyage effectué en fin de session : `xml_curl debug_on`/siptrace désactivés, loglevel
+  remis à warning, fichiers temp `/tmp/*.tmp.xml` supprimés, entrée `/etc/hosts` de test
+  retirée. Comptes de test restants dans la DB (tenant t1001 réutilise la vraie compagnie
+  Simple IP inc. — voulu, confirmé par l'utilisateur ; extensions 100/101 ; user SIPV
+  `test@simpleip.tel`) — pas nettoyés, à décider avec l'utilisateur. Contacts ERPCRM
+  "Test Un"/"Test Deux" créés automatiquement par le lien S022, maintenant rattachés à
+  la compagnie Simple IP dans ERPCRM (demandé par l'utilisateur).
 
 ---
 
@@ -698,16 +737,17 @@ Valide que l'architecture complète fonctionne de bout en bout.
 Voir détail complet dans "Points critiques" en haut du fichier (2026-07-18).
 Étapes dans l'ordre :
 1. Créer compagnie ERPCRM → déclenche création tenant SIPV automatique (sync/company) — ✓ fait manuellement (checkbox ERPCRM TASK-022), pas testé via le vrai flux checkbox UI (fait par curl direct)
-2. Créer contact ERPCRM + cocher sipv_sync → vérifier lien dans SIPV — non testé cette session
-3. Créer extension depuis SIPV → vérifier contact ERPCRM mis à jour — non testé (S022 codée mais pas exercée dans ce test)
+2. Créer contact ERPCRM + cocher sipv_sync → vérifier lien dans SIPV — non testé dans ce sens (ERPCRM→SIPV) cette session
+3. Créer extension depuis SIPV → vérifier contact ERPCRM mis à jour — ✓ confirmé involontairement : la création des extensions 100/101 a bien déclenché la création automatique des contacts "Test Un"/"Test Deux" dans ERPCRM (TASK-S022 fonctionne)
 4. Commit changements → vérifier que mod_xml_curl sert directory.xml correct pour ce tenant — ✓ confirmé
 5. Enregistrer softphone avec credentials extension → vérifier "Registered" — ✓ confirmé (baresip, 200 OK, visible dans sofia status reg)
-6. Appel interne entre deux extensions du même tenant → vérifier CDR créé en DB — ❌ échoue (480, contexte "public" au lieu de "internal-t1001" — bug ouvert)
-7. Vérifier isolation : extension tenant A ne peut pas joindre extension tenant B — non testé (bloqué par 6)
-8. Appel entrant sur DID → IVR → extension → vérifier CDR + routage correct — non testé
+6. Appel interne entre deux extensions du même tenant → vérifier CDR créé en DB — ✓ CONFIRMÉ (RTP établi + CDR créé, voir détail dans "Points critiques")
+7. Vérifier isolation : extension tenant A ne peut pas joindre extension tenant B — non testé
+8. Appel entrant sur DID → IVR → extension → vérifier CDR + routage correct — non testé (explicitement reporté par l'utilisateur — trunk/appels externes = plus tard)
 9. Portail ERPCRM "Mon poste" → statut live affiché, CDR personnel visible selon permissions — non fait (TASK-019 ERPCRM pas codée)
 10. Alerte : interrompre connexion FreeSWITCH → vérifier alerte reçue — non fait (TASK-S034 pas codée)
 Dépend de : TASK-S017.1, TASK-S020, TASK-S021, TASK-S022, TASK-S027, TASK-S028, TASK-S037.
+Reste à faire pour clore complètement cette tâche : étapes 7, 8, 9, 10 ci-dessus.
 
 ---
 
