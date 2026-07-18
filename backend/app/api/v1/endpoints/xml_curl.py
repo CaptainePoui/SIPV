@@ -63,7 +63,11 @@ def _context_name(account_number: str) -> str:
 
 
 def _bridge(username: str, domain: str) -> str:
-    return f"sofia/internal/{xe(username)}@{xe(domain)}"
+    # "user/" declenche la resolution via le dial-string du domaine (voir directory XML,
+    # param dial-string -> sofia_contact) plutot qu'un "sofia/internal/user@domain" litteral,
+    # qui fait tenter a FreeSWITCH une resolution DNS de "domain" (notre tenant, pas un vrai
+    # nom DNS) -> "503 DNS Error" systematique. Confirme par test reel le 2026-07-18.
+    return f"user/{xe(username)}@{xe(domain)}"
 
 
 # ── Main router ────────────────────────────────────────────────────────────────
@@ -218,23 +222,40 @@ async def _handle_dialplan(form, db: AsyncSession) -> Response:
     """
     Return routing rules for a given context.
 
-    internal-{account}  → local extension calls, voicemail, outbound
+    Un vrai lookup dialplan FreeSWITCH (mod_dialplan_xml) n'envoie PAS les champs
+    simples "context"/"destination_number" — il envoie un evenement complet avec
+    "Caller-Context", "Caller-Destination-Number", "variable_sip_from_host", etc.
+    (confirme par capture reelle le 2026-07-18 — le code precedent lisait des champs
+    qui n'existaient jamais dans une vraie requete).
+
+    internal-{account}  → contexte historique explicite (jamais emis en pratique par
+                           FreeSWITCH — le profil sofia "internal" a un seul context
+                           statique, pas un par tenant — garde pour compatibilite)
     public              → inbound DID routing (from trunks)
+    sipv-internal       → contexte reel du profil sofia "internal" (voir internal.xml) ;
+                           le tenant est determine ICI, au debut du routage, via le
+                           domaine d'origine de l'appelant (variable_sip_from_host) —
+                           pas via une variable per-user qui ne se propage pas de facon fiable
     """
-    context = form.get("context", "")
-    destination = form.get("destination_number", "")
+    context = form.get("Caller-Context") or form.get("context", "")
+    destination = form.get("Caller-Destination-Number") or form.get("destination_number", "")
 
     if context.startswith("internal-"):
         account = context[len("internal-"):]
-        return await _dialplan_internal(account, destination, db)
+        return await _dialplan_internal(account, destination, db, requested_context=context)
 
     if context == "public":
         return await _dialplan_public(destination, db)
 
+    if context == "sipv-internal":
+        account = form.get("variable_sip_from_host", "")
+        if account:
+            return await _dialplan_internal(account, destination, db, requested_context=context)
+
     return _resp(NOT_FOUND)
 
 
-async def _dialplan_internal(account: str, destination: str, db: AsyncSession) -> Response:
+async def _dialplan_internal(account: str, destination: str, db: AsyncSession, requested_context: str | None = None) -> Response:
     """
     Dialplan for internal tenant context.
     Handles:
@@ -242,6 +263,11 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession) -
       - Ring group calls
       - Voicemail access (*97, *98)
       - Outbound calls via configured routes
+
+    requested_context : le nom de contexte EXACT que FreeSWITCH a demande (Caller-Context).
+    Le XML <context name="..."> retourne doit correspondre EXACTEMENT a ce qui a ete
+    demande, sinon FreeSWITCH rejette la reponse comme "not found" meme si elle contient
+    un dialplan valide sous un autre nom.
     """
     result = await db.execute(
         select(Tenant).where(Tenant.account_number == account, Tenant.is_active == True)
@@ -277,7 +303,7 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession) -
     )
     out_routes = result.scalars().all()
 
-    ctx = xe(f"internal-{account}")
+    ctx = xe(requested_context or f"internal-{account}")
     domain = xe(account)
     ext_entries = _ext_dialplan_entries(extensions, domain)
     rg_entries = _ringgroup_dialplan_entries(ring_groups, domain)

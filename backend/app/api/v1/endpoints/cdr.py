@@ -2,18 +2,87 @@ import uuid
 import csv
 import io
 import math
+import logging
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from decimal import Decimal
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, status
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
 from pydantic import BaseModel
 from app.core.database import get_db
 from app.api.v1.endpoints.auth import get_current_user
 from app.models.cdr import CDR, RatePrefix
+from app.models.tenant import Tenant
 from app.models.user import User
 
 router = APIRouter()
+logger = logging.getLogger("cdr_ingest")
+
+
+def _epoch_to_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        n = int(value)
+        if n <= 0:
+            return None
+        return datetime.fromtimestamp(n, tz=timezone.utc)
+    except (ValueError, OSError):
+        return None
+
+
+@router.post("/ingest", response_class=PlainTextResponse)
+async def ingest_cdr(request: Request, db: AsyncSession = Depends(get_db)):
+    """
+    Recoit le POST de mod_xml_cdr a la fin de chaque appel (voir xml_cdr.conf.xml,
+    param "url"). Pas d'authentification — appele uniquement par FreeSWITCH en local.
+    Format : XML brut dans le corps (mod_xml_cdr configure avec encode="textxml").
+    """
+    body = (await request.body()).decode("utf-8", errors="replace")
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError as e:
+        logger.warning("CDR XML invalide: %s", e)
+        return "+ERR invalid XML"
+
+    variables = {}
+    var_block = root.find("variables")
+    if var_block is not None:
+        for child in var_block:
+            variables[child.tag] = child.text
+
+    domain = variables.get("sip_from_host") or variables.get("domain_name") or ""
+    result = await db.execute(select(Tenant).where(Tenant.account_number == domain))
+    tenant = result.scalar_one_or_none()
+    if not tenant:
+        logger.warning("CDR ignore, tenant inconnu pour domaine '%s'", domain)
+        return "+OK"
+
+    cdr = CDR(
+        tenant_id=tenant.id,
+        accountcode=variables.get("accountcode"),
+        src=variables.get("sip_from_user") or variables.get("caller_id_number"),
+        dst=variables.get("sip_to_user") or variables.get("destination_number"),
+        dcontext=variables.get("context"),
+        clid=variables.get("caller_id_name"),
+        channel=variables.get("channel_name"),
+        dstchannel=variables.get("bridge_channel"),
+        lastapp=variables.get("last_app"),
+        lastdata=variables.get("last_arg"),
+        start_time=_epoch_to_dt(variables.get("start_epoch")),
+        answer_time=_epoch_to_dt(variables.get("answer_epoch")),
+        end_time=_epoch_to_dt(variables.get("end_epoch")),
+        duration=int(variables["duration"]) if variables.get("duration") else None,
+        billsec=int(variables["billsec"]) if variables.get("billsec") else None,
+        disposition=variables.get("hangup_cause"),
+        uniqueid=variables.get("uuid"),
+        direction=variables.get("direction"),
+    )
+    db.add(cdr)
+    await db.commit()
+    return "+OK"
 
 
 # ── Rate Prefixes ────────────────────────────────────────────────────────────
