@@ -10,7 +10,8 @@ from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.audit import log_audit
 from app.core import erpcrm_client
-from app.api.v1.endpoints.auth import get_current_user
+from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
+from app.api.v1.endpoints.sync import verify_api_key
 from app.models.sip import SIPExtension
 from app.models.tenant import Tenant
 from app.models.pending_change import PendingChange
@@ -118,8 +119,23 @@ def _snapshot(e: SIPExtension) -> dict:
 
 
 @router.get("/tenant/{tenant_id}", response_model=list[ExtOut])
-async def list_extensions(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def list_extensions(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(SIPExtension).where(SIPExtension.tenant_id == tenant_id).order_by(SIPExtension.extension))
+    return [_out(e) for e in result.scalars().all()]
+
+
+@router.get("/by-contact/{erpcrm_contact_id}", response_model=list[ExtOut])
+async def get_extensions_by_contact(
+    erpcrm_contact_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    """
+    Appele par ERPCRM (proxy) pour afficher le poste SIP lie a un contact sur sa fiche.
+    Authentifie par X-Api-Key (meme cle que /sync/company) — jamais par login utilisateur,
+    puisque c'est ERPCRM (un serveur) qui appelle, pas un utilisateur SIPV.
+    """
+    result = await db.execute(select(SIPExtension).where(SIPExtension.erpcrm_contact_id == erpcrm_contact_id))
     return [_out(e) for e in result.scalars().all()]
 
 

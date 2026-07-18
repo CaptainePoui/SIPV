@@ -1,16 +1,18 @@
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from jose import JWTError
 from pydantic import BaseModel
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import verify_password, create_access_token, decode_token
 from app.models.user import User
 
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
 
 
 class LoginRequest(BaseModel):
@@ -50,6 +52,35 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="Utilisateur introuvable")
     return user
+
+
+async def get_current_user_or_service(
+    token: str | None = Depends(oauth2_scheme_optional),
+    x_api_key: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> User | None:
+    """
+    Accepte soit un JWT utilisateur SIPV normal, soit la cle de service ERPCRM
+    (X-Api-Key). Retourne un User pour un login normal, None pour un appel de service
+    (ERPCRM). Utilise sur les endpoints qu'ERPCRM doit pouvoir appeler en proxy (fiche
+    compagnie/contact) sans compte utilisateur SIPV.
+    """
+    if x_api_key:
+        if not settings.ERPCRM_API_KEY or x_api_key != settings.ERPCRM_API_KEY:
+            raise HTTPException(status_code=401, detail="Clé API invalide")
+        return None
+    if token:
+        try:
+            payload = decode_token(token)
+            user_id = payload.get("sub")
+        except JWTError:
+            raise HTTPException(status_code=401, detail="Token invalide")
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if not user or not user.is_active:
+            raise HTTPException(status_code=401, detail="Utilisateur introuvable")
+        return user
+    raise HTTPException(status_code=401, detail="Authentification requise")
 
 
 @router.get("/me")

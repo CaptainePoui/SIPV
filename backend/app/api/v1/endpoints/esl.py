@@ -6,7 +6,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.api.v1.endpoints.auth import get_current_user
+from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
 from app.core.esl import get_esl, ESLClient
 from app.models.user import User
 from app.models.sip import SIPExtension
@@ -75,7 +75,7 @@ async def all_registrations(_: User = Depends(get_current_user)):
 async def tenant_registrations(
     tenant_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User | None = Depends(get_current_user_or_service),
 ):
     """
     Check registration status for every extension of a tenant.
