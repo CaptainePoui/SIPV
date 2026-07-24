@@ -491,6 +491,18 @@ def _ext_dialplan_entries(extensions: list, domain: str, account: str, ctx: str,
             continue
 
         bridge = _bridge(ext.username, domain)
+        if ext.auto_answer_enabled:
+            # Intercom auto-answer -- Call-Info;answer-after=0 est la convention SIP
+            # standard reconnue par la plupart des telephones de bureau (Grandstream,
+            # Polycom, Yealink) pour l'auto-reponse "intercom". Verifie structurellement
+            # (le header apparait bien dans le bridge genere) mais PAS avec un vrai
+            # appel decroche automatiquement sur un telephone physique (TASK-023.11 --
+            # aurait demande de faire sonner/repondre reellement le GXP2135 de test
+            # sans confirmation prealable de l'utilisateur, pas fait a la sauvette).
+            # intercom_warning_tone/intercom_mic_muted_on_answer restent stockes mais
+            # PAS cables (necessiteraient un script post-reponse par uuid, pas encore
+            # de mecanisme etabli dans ce projet pour ca).
+            bridge = f"{{sip_h_Call-Info=<sip:intercom>;answer-after=0}}{bridge}"
         vm_action = ""
         if ext.voicemail_enabled:
             vm_action = f'\n          <action application="voicemail" data="default ${{domain_name}} {xe(ext.username)}"/>'

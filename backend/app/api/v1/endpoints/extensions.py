@@ -93,6 +93,16 @@ class ExtOut(BaseModel):
     paging_groups: str | None
     can_intercept_calls: bool
     groups: list[str] = []
+    # --- TASK-023.11 : intercom/paging granulaire ---
+    intercom_warning_tone: bool
+    intercom_mic_muted_on_answer: bool
+    paging_priority: int
+    paging_allow_send: bool
+    paging_allow_receive: bool
+    paging_emergency: bool
+    multicast_address: str | None
+    multicast_port: int | None
+    forced_volume: int | None
     # --- TASK-S018.5 : plan d'appel (null = herite du Tenant, voir _resolve_call_permission) ---
     allow_canada: bool | None
     allow_us: bool | None
@@ -152,6 +162,15 @@ class ExtCreate(BaseModel):
     pickup_group: str | None = None
     paging_groups: str | None = None
     can_intercept_calls: bool = True
+    intercom_warning_tone: bool = True
+    intercom_mic_muted_on_answer: bool = False
+    paging_priority: int = 0
+    paging_allow_send: bool = True
+    paging_allow_receive: bool = True
+    paging_emergency: bool = False
+    multicast_address: str | None = None
+    multicast_port: int | None = None
+    forced_volume: int | None = None
     allow_canada: bool | None = None
     allow_us: bool | None = None
     allow_international: bool | None = None
@@ -209,6 +228,15 @@ class ExtUpdate(BaseModel):
     pickup_group: str | None = None
     paging_groups: str | None = None
     can_intercept_calls: bool | None = None
+    intercom_warning_tone: bool | None = None
+    intercom_mic_muted_on_answer: bool | None = None
+    paging_priority: int | None = None
+    paging_allow_send: bool | None = None
+    paging_allow_receive: bool | None = None
+    paging_emergency: bool | None = None
+    multicast_address: str | None = None
+    multicast_port: int | None = None
+    forced_volume: int | None = None
     allow_canada: bool | None = None
     allow_us: bool | None = None
     allow_international: bool | None = None
@@ -250,6 +278,10 @@ def _out(e: SIPExtension, groups: list[str] | None = None) -> ExtOut:
         dnd_enabled=e.dnd_enabled, dnd_locked=e.dnd_locked, auto_answer_enabled=e.auto_answer_enabled,
         max_concurrent_calls=e.max_concurrent_calls, distinctive_ring=e.distinctive_ring,
         pickup_group=e.pickup_group, paging_groups=e.paging_groups, can_intercept_calls=e.can_intercept_calls,
+        intercom_warning_tone=e.intercom_warning_tone, intercom_mic_muted_on_answer=e.intercom_mic_muted_on_answer,
+        paging_priority=e.paging_priority, paging_allow_send=e.paging_allow_send, paging_allow_receive=e.paging_allow_receive,
+        paging_emergency=e.paging_emergency, multicast_address=e.multicast_address, multicast_port=e.multicast_port,
+        forced_volume=e.forced_volume,
         groups=groups or [],
         allow_canada=e.allow_canada, allow_us=e.allow_us, allow_international=e.allow_international,
         allow_premium=e.allow_premium, blocked_countries=e.blocked_countries, blocked_prefixes=e.blocked_prefixes,
@@ -324,6 +356,15 @@ def _snapshot(e: SIPExtension) -> dict:
         "pickup_group": e.pickup_group,
         "paging_groups": e.paging_groups,
         "can_intercept_calls": e.can_intercept_calls,
+        "intercom_warning_tone": e.intercom_warning_tone,
+        "intercom_mic_muted_on_answer": e.intercom_mic_muted_on_answer,
+        "paging_priority": e.paging_priority,
+        "paging_allow_send": e.paging_allow_send,
+        "paging_allow_receive": e.paging_allow_receive,
+        "paging_emergency": e.paging_emergency,
+        "multicast_address": e.multicast_address,
+        "multicast_port": e.multicast_port,
+        "forced_volume": e.forced_volume,
         "allow_canada": e.allow_canada,
         "allow_us": e.allow_us,
         "allow_international": e.allow_international,

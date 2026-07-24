@@ -89,6 +89,17 @@ class SIPExtension(Base):
     paging_groups: Mapped[str | None] = mapped_column(String(255))  # CSV
     can_intercept_calls: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # --- TASK-023.11 : intercom/paging granulaire ---
+    intercom_warning_tone: Mapped[bool] = mapped_column(Boolean, default=True)
+    intercom_mic_muted_on_answer: Mapped[bool] = mapped_column(Boolean, default=False)
+    paging_priority: Mapped[int] = mapped_column(Integer, default=0)
+    paging_allow_send: Mapped[bool] = mapped_column(Boolean, default=True)
+    paging_allow_receive: Mapped[bool] = mapped_column(Boolean, default=True)
+    paging_emergency: Mapped[bool] = mapped_column(Boolean, default=False)
+    multicast_address: Mapped[str | None] = mapped_column(String(45))
+    multicast_port: Mapped[int | None] = mapped_column(Integer)
+    forced_volume: Mapped[int | None] = mapped_column(Integer)  # 0-100, null = pas impose
+
     # --- TASK-S018.5 : plan d'appel reellement applique (nullable = herite du Tenant) ---
     allow_canada: Mapped[bool | None] = mapped_column(Boolean)
     allow_us: Mapped[bool | None] = mapped_column(Boolean)

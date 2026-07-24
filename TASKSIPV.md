@@ -2067,6 +2067,32 @@ relu correctement via l'API, membre + file supprimés après coup (0 lignes
 Fichiers : sipv/backend/app/models/ivr.py, api/v1/endpoints/ivr.py,
 alembic/versions/0033_queue_ring_multi.py.
 
+### TASK-023.11 [~] Intercom/paging granulaire
+Au-delà de `paging_groups`/`can_intercept_calls` (S007.2), migration `0034_intercom_
+paging` : `intercom_warning_tone`, `intercom_mic_muted_on_answer`, `paging_priority`,
+`paging_allow_send`, `paging_allow_receive`, `paging_emergency`, `multicast_address`,
+`multicast_port`, `forced_volume` sur `SIPExtension`.
+
+Câblé (le seul des 9 champs qui l'est) : `auto_answer_enabled` (existait déjà depuis
+S018.3, jamais câblé) déclenche maintenant un vrai auto-answer intercom -- préfixe le
+bridge avec `{sip_h_Call-Info=<sip:intercom>;answer-after=0}`, convention SIP standard
+reconnue par la plupart des téléphones de bureau (Grandstream/Polycom/Yealink).
+Vérifié structurellement en direct (bascule réelle en DB sur t1001-101 -> le header
+apparaît bien dans le bridge généré, remis à `false` après) -- PAS vérifié avec un
+vrai décrochage automatique sur le GXP2135 physique de test (aurait fait sonner/
+répondre un appareil réel sans demande explicite de l'utilisateur pour ce test précis,
+pas fait à la sauvette).
+
+⚠️ [~] : les 8 autres champs (tonalité, micro coupé, priorité/émission/réception/
+urgence paging, multicast, volume forcé) sont stockés/éditables mais PAS câblés --
+le paging multicast en particulier est surtout une config CÔTÉ TÉLÉPHONE (P-codes
+Grandstream, TASK-S011.4, pas encore commencée) plutôt qu'une fonctionnalité
+dialplan FreeSWITCH ; le micro coupé après réponse nécessiterait un script post-
+réponse par UUID sans mécanisme établi dans ce projet pour l'instant. Documenté
+honnêtement plutôt que deviné.
+Fichiers : sipv/backend/app/models/sip.py, api/v1/endpoints/xml_curl.py,
+api/v1/endpoints/extensions.py, alembic/versions/0034_intercom_paging.py.
+
 ### TASK-S010.2 [x] 911 par poste (pas seulement par DID)
 Dépend de : TASK-S010 (E911Address/DID911Assignment existants — liés au DID, pas au poste)
 
