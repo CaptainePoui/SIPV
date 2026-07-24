@@ -459,6 +459,28 @@ def _forward_action_xml(dest_type: str, dest_value: str | None, ext: "SIPExtensi
     return None
 
 
+def _resolve_alert_info(ext: "SIPExtension", caller_number: str | None) -> str | None:
+    """
+    Resout la valeur Alert-Info a envoyer pour un appel interne vers `ext` (TASK-023.12).
+    Priorite : silencieux > regle caller ID > sonnerie interne specifique > sonnerie
+    distinctive generale (S018.3). Retourne None si rien de configure (aucun header
+    ajoute -- comportement identique a avant cette tache).
+    """
+    if ext.silent_ring:
+        return "silent"
+    if ext.caller_id_ring_rules and caller_number:
+        for rule in ext.caller_id_ring_rules.split(","):
+            if ":" not in rule:
+                continue
+            pattern, ring = rule.split(":", 1)
+            pattern = pattern.strip()
+            if pattern and pattern in caller_number:
+                return ring.strip()
+    if ext.ring_internal:
+        return ext.ring_internal
+    return ext.distinctive_ring or None
+
+
 def _ext_dialplan_entries(extensions: list, domain: str, account: str, ctx: str, caller_ext: "SIPExtension | None" = None) -> str:
     # Enregistrement automatique "interne" (TASK-023.4) : declenche si le poste
     # APPELANT a active le sortant, OU si le poste APPELE (destinataire de cette
@@ -503,6 +525,15 @@ def _ext_dialplan_entries(extensions: list, domain: str, account: str, ctx: str,
             # PAS cables (necessiteraient un script post-reponse par uuid, pas encore
             # de mecanisme etabli dans ce projet pour ca).
             bridge = f"{{sip_h_Call-Info=<sip:intercom>;answer-after=0}}{bridge}"
+        else:
+            # --- TASK-023.12 : sonnerie interne / silencieuse / regle par caller ID ---
+            # Alert-Info est un header SIP standard -- c'est le TELEPHONE (Grandstream/
+            # Polycom/etc.) qui decide quelle sonnerie jouer selon sa valeur, FreeSWITCH
+            # ne fait que le transmettre. Sans auto-answer (sinon ca ne sonne jamais).
+            caller_num = (caller_ext.caller_id_internal_number or caller_ext.caller_id_number or caller_ext.extension) if caller_ext else None
+            alert_info = _resolve_alert_info(ext, caller_num)
+            if alert_info:
+                bridge = f"{{sip_h_Alert-Info=<sip:{xe(alert_info)}>}}{bridge}"
         vm_action = ""
         if ext.voicemail_enabled:
             vm_action = f'\n          <action application="voicemail" data="default ${{domain_name}} {xe(ext.username)}"/>'

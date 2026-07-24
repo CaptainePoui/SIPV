@@ -2093,6 +2093,34 @@ honnêtement plutôt que deviné.
 Fichiers : sipv/backend/app/models/sip.py, api/v1/endpoints/xml_curl.py,
 api/v1/endpoints/extensions.py, alembic/versions/0034_intercom_paging.py.
 
+### TASK-023.12 [~] Sonnerie détaillée (interne/externe/file/silencieuse/règle caller ID)
+Au-delà de `distinctive_ring` (S018.3, un seul champ). "Temps maximal de sonnerie" =
+déjà `forward_no_answer_delay_seconds` (pas dupliqué) ; "volume imposé" = déjà
+`forced_volume` (TASK-023.11, réglage partagé paging/sonnerie, pas dupliqué).
+
+Migration `0035_ring_detail` : `ring_internal`, `ring_external`, `ring_queue`,
+`silent_ring`, `caller_id_ring_rules` (format simple `"motif:sonnerie,motif2:..."`).
+
+Câblé pour les appels INTERNES seulement (`_resolve_alert_info()`) : Alert-Info est
+un header SIP standard -- FreeSWITCH le transmet, c'est le TÉLÉPHONE qui choisit
+la sonnerie locale selon sa valeur (comme le Call-Info intercom de S023.11). Priorité :
+silencieux > règle caller ID (motif trouvé dans le numéro de l'appelant) > sonnerie
+interne spécifique > sonnerie distinctive générale (repli). Rien n'est ajouté si
+aucun de ces champs n'est configuré (comportement identique à avant).
+
+Testé en direct (bascule réelle sur t1001-101) : `silent_ring=true` -> header
+`Alert-Info=<sip:silent>` confirmé dans le bridge généré ; `caller_id_ring_rules=
+"100:vip-ring"` avec un appel simulé depuis t1001-100 -> `Alert-Info=<sip:vip-ring>`
+correctement résolu (le motif "100" a matché le numéro de l'appelant). Remis à
+`false`/`NULL` après vérification.
+
+⚠️ [~] : `ring_external` (appel entrant DID, aucun trunk réel actif pour tester) et
+`ring_queue` (mod_callcenter jamais alimenté, même limite que S007.2) restent
+stockés mais PAS câblés -- pas de chemin d'appel réel à travers lequel les tester
+honnêtement dans cet environnement pour l'instant.
+Fichiers : sipv/backend/app/models/sip.py, api/v1/endpoints/xml_curl.py,
+api/v1/endpoints/extensions.py, alembic/versions/0035_ring_detail.py.
+
 ### TASK-S010.2 [x] 911 par poste (pas seulement par DID)
 Dépend de : TASK-S010 (E911Address/DID911Assignment existants — liés au DID, pas au poste)
 

@@ -72,6 +72,14 @@ class SIPExtension(Base):
     auto_answer_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     max_concurrent_calls: Mapped[int | None] = mapped_column(Integer)
     distinctive_ring: Mapped[str | None] = mapped_column(String(50))
+    # --- TASK-023.12 : sonnerie detaillee. "Temps maximal de sonnerie" = deja
+    # forward_no_answer_delay_seconds (pas duplique) ; "volume impose" = deja
+    # forced_volume (TASK-023.11, pas duplique -- meme reglage partage paging/sonnerie).
+    ring_internal: Mapped[str | None] = mapped_column(String(50))  # override Alert-Info pour appel interne
+    ring_external: Mapped[str | None] = mapped_column(String(50))  # override Alert-Info pour appel externe (DID)
+    ring_queue: Mapped[str | None] = mapped_column(String(50))  # pas encore cable, voir note S007.2 (mod_callcenter jamais alimente)
+    silent_ring: Mapped[bool] = mapped_column(Boolean, default=False)
+    caller_id_ring_rules: Mapped[str | None] = mapped_column(Text)  # format simple "motif:sonnerie,motif2:sonnerie2"
     # Mode d'enregistrement (pertinent seulement si record_calls=True) -- manual = agent
     # declenche via feature code, auto = enregistre systematiquement.
     record_mode: Mapped[str] = mapped_column(String(10), default="manual", server_default="manual")

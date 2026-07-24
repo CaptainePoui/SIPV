@@ -103,6 +103,12 @@ class ExtOut(BaseModel):
     multicast_address: str | None
     multicast_port: int | None
     forced_volume: int | None
+    # --- TASK-023.12 : sonnerie detaillee ---
+    ring_internal: str | None
+    ring_external: str | None
+    ring_queue: str | None
+    silent_ring: bool
+    caller_id_ring_rules: str | None
     # --- TASK-S018.5 : plan d'appel (null = herite du Tenant, voir _resolve_call_permission) ---
     allow_canada: bool | None
     allow_us: bool | None
@@ -171,6 +177,11 @@ class ExtCreate(BaseModel):
     multicast_address: str | None = None
     multicast_port: int | None = None
     forced_volume: int | None = None
+    ring_internal: str | None = None
+    ring_external: str | None = None
+    ring_queue: str | None = None
+    silent_ring: bool = False
+    caller_id_ring_rules: str | None = None
     allow_canada: bool | None = None
     allow_us: bool | None = None
     allow_international: bool | None = None
@@ -237,6 +248,11 @@ class ExtUpdate(BaseModel):
     multicast_address: str | None = None
     multicast_port: int | None = None
     forced_volume: int | None = None
+    ring_internal: str | None = None
+    ring_external: str | None = None
+    ring_queue: str | None = None
+    silent_ring: bool | None = None
+    caller_id_ring_rules: str | None = None
     allow_canada: bool | None = None
     allow_us: bool | None = None
     allow_international: bool | None = None
@@ -282,6 +298,8 @@ def _out(e: SIPExtension, groups: list[str] | None = None) -> ExtOut:
         paging_priority=e.paging_priority, paging_allow_send=e.paging_allow_send, paging_allow_receive=e.paging_allow_receive,
         paging_emergency=e.paging_emergency, multicast_address=e.multicast_address, multicast_port=e.multicast_port,
         forced_volume=e.forced_volume,
+        ring_internal=e.ring_internal, ring_external=e.ring_external, ring_queue=e.ring_queue,
+        silent_ring=e.silent_ring, caller_id_ring_rules=e.caller_id_ring_rules,
         groups=groups or [],
         allow_canada=e.allow_canada, allow_us=e.allow_us, allow_international=e.allow_international,
         allow_premium=e.allow_premium, blocked_countries=e.blocked_countries, blocked_prefixes=e.blocked_prefixes,
@@ -365,6 +383,11 @@ def _snapshot(e: SIPExtension) -> dict:
         "multicast_address": e.multicast_address,
         "multicast_port": e.multicast_port,
         "forced_volume": e.forced_volume,
+        "ring_internal": e.ring_internal,
+        "ring_external": e.ring_external,
+        "ring_queue": e.ring_queue,
+        "silent_ring": e.silent_ring,
+        "caller_id_ring_rules": e.caller_id_ring_rules,
         "allow_canada": e.allow_canada,
         "allow_us": e.allow_us,
         "allow_international": e.allow_international,
