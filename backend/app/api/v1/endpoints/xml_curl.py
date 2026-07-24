@@ -297,11 +297,22 @@ async def _handle_dialplan(form, db: AsyncSession) -> Response:
     internal-{account}  → contexte historique explicite (jamais emis en pratique par
                            FreeSWITCH — le profil sofia "internal" a un seul context
                            statique, pas un par tenant — garde pour compatibilite)
-    public              → inbound DID routing (from trunks)
+    public / sipv-external → inbound DID routing (from trunks). "public" garde pour
+                           compat mais ne sera JAMAIS reellement demande par
+                           FreeSWITCH pour le profil external (voir sipv-external
+                           ci-dessous) -- collision avec dialplan/public.xml
+                           statique (meme piege deja rencontre et corrige pour le
+                           profil internal, TASK-S036 point 10).
     sipv-internal       → contexte reel du profil sofia "internal" (voir internal.xml) ;
                            le tenant est determine ICI, au debut du routage, via le
                            domaine d'origine de l'appelant (variable_sip_from_host) —
                            pas via une variable per-user qui ne se propage pas de facon fiable
+    sipv-external       → contexte reel du profil sofia "external" (TASK-023.27,
+                           premier trunk PSTN reel) -- renomme depuis "public" pour
+                           la MEME raison que sipv-internal : dialplan/public.xml
+                           (fichier statique vanilla) est prioritaire sur mod_xml_curl
+                           pour le contexte "public", ce qui aurait empeche tout
+                           appel entrant reel d'atteindre notre backend.
     """
     context = form.get("Caller-Context") or form.get("context", "")
     destination = form.get("Caller-Destination-Number") or form.get("destination_number", "")
@@ -310,8 +321,8 @@ async def _handle_dialplan(form, db: AsyncSession) -> Response:
         account = context[len("internal-"):]
         return await _dialplan_internal(account, destination, db, requested_context=context)
 
-    if context == "public":
-        return await _dialplan_public(destination, db)
+    if context in ("public", "sipv-external"):
+        return await _dialplan_public(destination, db, requested_context=context)
 
     if context == "sipv-internal":
         account = form.get("variable_sip_from_host", "")
@@ -866,10 +877,16 @@ def _pattern_to_regex(pattern: str) -> str:
     return f"^({p})$"
 
 
-async def _dialplan_public(destination: str, db: AsyncSession) -> Response:
+async def _dialplan_public(destination: str, db: AsyncSession, requested_context: str = "public") -> Response:
     """
-    Dialplan for inbound calls from trunks (context=public).
+    Dialplan for inbound calls from trunks (context=public / sipv-external).
     Matches DID number → routes to extension, IVR, or voicemail.
+
+    `requested_context` : le <context name="..."> retourne DOIT correspondre
+    EXACTEMENT au contexte demande par FreeSWITCH (meme regle deja etablie pour
+    _dialplan_internal -- verifie dans switch_xml.c) -- sans ca, un appel entrant
+    reel via le profil external (context="sipv-external", TASK-023.27) serait
+    rejete comme "not found" meme avec une reponse par ailleurs valide.
     """
     # Normalize DID: try with and without leading 1
     dids_to_try = [destination]
@@ -901,12 +918,13 @@ async def _dialplan_public(destination: str, db: AsyncSession) -> Response:
 
     domain = xe(tenant.account_number)
     dest_num = xe(destination)
+    ctx = xe(requested_context)
     actions = await _inbound_actions(route, tenant, db)
 
     xml = f"""{XML_HDR}
 <document type="freeswitch/xml">
   <section name="dialplan">
-    <context name="public">
+    <context name="{ctx}">
 
       <extension name="inbound_{dest_num}">
         <condition field="destination_number" expression="^{dest_num}$">

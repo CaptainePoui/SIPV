@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 from app.core.database import get_db
+from app.core.crypto import encrypt, decrypt
 from app.api.v1.endpoints.auth import get_current_user
 from app.models.sip import SIPTrunk
 from app.models.pending_change import PendingChange
@@ -26,6 +27,7 @@ class TrunkOut(BaseModel):
     carrier_name: str
     host: str
     username: str | None
+    has_password: bool = False  # jamais le mot de passe en clair dans la liste/fiche
     from_domain: str | None
     caller_id: str | None
     failover_trunk_id: uuid.UUID | None
@@ -58,7 +60,8 @@ class TrunkUpdate(BaseModel):
 def _out(t: SIPTrunk) -> TrunkOut:
     return TrunkOut(
         id=t.id, tenant_id=t.tenant_id, name=t.name, carrier_name=t.carrier_name,
-        host=t.host, username=t.username, from_domain=t.from_domain, caller_id=t.caller_id,
+        host=t.host, username=t.username, has_password=bool(t.password),
+        from_domain=t.from_domain, caller_id=t.caller_id,
         failover_trunk_id=t.failover_trunk_id, is_active=t.is_active,
         freeswitch_synced=t.freeswitch_synced, created_at=t.created_at,
     )
@@ -73,7 +76,10 @@ async def list_trunks(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), 
 @router.post("/tenant/{tenant_id}", response_model=TrunkOut, status_code=status.HTTP_201_CREATED)
 async def create_trunk(tenant_id: uuid.UUID, payload: TrunkCreate, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     trunk_name = f"trunk-{payload.name.lower().replace(' ', '_')}"
-    t = SIPTrunk(tenant_id=tenant_id, **payload.model_dump())
+    data = payload.model_dump()
+    if data.get("password"):
+        data["password"] = encrypt(data["password"])
+    t = SIPTrunk(tenant_id=tenant_id, **data)
     db.add(t)
     change = PendingChange(
         tenant_id=tenant_id, change_type="add_trunk", entity_type="trunk",
@@ -92,7 +98,10 @@ async def update_trunk(trunk_id: uuid.UUID, payload: TrunkUpdate, db: AsyncSessi
     t = result.scalar_one_or_none()
     if not t:
         raise HTTPException(status_code=404, detail="Trunk introuvable")
-    for k, v in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    if data.get("password"):
+        data["password"] = encrypt(data["password"])
+    for k, v in data.items():
         setattr(t, k, v)
     t.freeswitch_synced = False
     change = PendingChange(

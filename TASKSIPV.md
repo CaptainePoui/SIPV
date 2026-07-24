@@ -2435,3 +2435,80 @@ Contraintes/leçons à respecter, tirées de l'expérience réelle de cette sess
   React Native), librairie SIP a évaluer (PJSIP, Linphone SDK, etc. — a rechercher),
   fonctionnalités minimales (juste appels, ou aussi messagerie vocale/transferts/etc.).
 Pas commencé — inscrit pour ne pas perdre le contexte des contraintes découvertes.
+
+### TASK-023.27 [x] Premier trunk PSTN réel (ScopServ, TLS) — bug contexte sipv-external
+Demande de l'utilisateur (2026-07-24) : connecter un vrai compte SIP de son serveur
+ScopServ (`vgw1.simpleip.scopcloud.com`, compte `15143222112`, DID de test qui lui
+appartient) pour pouvoir tester de vrais appels entrants/sortants PSTN, sans pousser
+de caller ID particulier. ScopServ reste pour l'instant la SEULE option de lignes
+réelles (pas de trunk carrier direct SimpleIP). Confirmé par l'utilisateur : ce DID
+sert uniquement à ses tests, pas de la production live.
+
+⚠️ Bug découvert en cours de route : le profil sofia `external` utilisait
+`context="public"`, qui collisionne avec le fichier statique vanilla
+`dialplan/public.xml` (chargé par FreeSWITCH AVANT mod_xml_curl pour ce nom de
+contexte) — exactement le même piège déjà rencontré et corrigé pour le profil
+`internal` (TASK-S036). Un appel entrant réel via ce profil n'aurait jamais atteint
+notre backend.
+   Fix : contexte du profil `external` renommé `sipv-external` (même précédent que
+   `sipv-internal`). `_handle_dialplan()` route `context in ("public", "sipv-external")`
+   vers `_dialplan_public()`. `_dialplan_public()` prenait un `requested_context`
+   codé en dur à `"public"` dans son XML de retour au lieu d'échoir le contexte
+   RÉELLEMENT demandé — FreeSWITCH exige une correspondance exacte entre le contexte
+   demandé et celui retourné (même règle déjà établie pour `_dialplan_internal`) ;
+   sans ce fix, `sipv-external` aurait été rejeté comme "not found" malgré une
+   réponse par ailleurs valide. Signature changée en
+   `_dialplan_public(destination, db, requested_context="public")`, XML retourne
+   `<context name="{requested_context}">`.
+
+⚠️ Deuxième blocage : premier essai d'enregistrement en UDP simple → ScopServ
+(Asterisk) répond `403 Forbidden` après un challenge digest pourtant correctement
+calculé (3 tentatives, arrêtées volontairement pour ne pas déclencher un
+anti-bruteforce sur le compte réel du client). L'utilisateur a confirmé de son côté :
+compte configuré en TLS chez ScopServ, IP publique du serveur SIPV whitelistée.
+   Fix : TLS activé sur le profil `external` (`external_ssl_enable=true`,
+   `external_tls_port=5081`, `tls-cert-dir=$${external_ssl_dir}` — réutilise les
+   certificats déjà en place pour le profil `internal`, `$${conf_dir}/tls`). Gateway
+   reconfiguré avec `register-transport="tls"`, `proxy`/`register-proxy` pointant
+   vers `vgw1.simpleip.scopcloud.com:5061` (port TLS standard côté ScopServ).
+   Résultat confirmé en direct : `sofia status gateway t1001-gw-1e083163` →
+   `State: REGED`, `Status: UP` — confirmé également visible côté ScopServ par
+   l'utilisateur ("oui je te vois connecter").
+
+Fait :
+- `SIPTrunk.password` maintenant chiffré (Fernet, `app/core/crypto.py`) — jamais en
+  clair en DB ni renvoyé par l'API (`TrunkOut.has_password: bool` remplace le champ
+  mot de passe, même pattern que `ld_pin`/mots de passe admin téléphone).
+  `create_trunk`/`update_trunk` chiffrent avant stockage.
+- Enregistrements créés en DB (tenant t1001) : `SIPTrunk` "ScopServ Test"
+  (`trunk_id=1e083163-f6f3-48c0-aff7-ff5e64fd9001`), `TenantDID` `15143222112`,
+  `InboundRoute` (DID → extension `t1001-100`, pour test), `OutboundRoute`
+  ("ScopServ test outbound", patterns `NXXNXXXXXX,1NXXNXXXXXX`, aucun strip/prepend).
+- Fichier gateway FreeSWITCH créé à la main sur le serveur (config runtime
+  FreeSWITCH, pas dans git) :
+  `/usr/local/freeswitch/conf/sip_profiles/external/t1001-gw-1e083163.xml`.
+- `vars.xml` et `sip_profiles/external.xml` modifiés en LIVE sur le serveur
+  (192.168.1.55) pour activer TLS + renommer le contexte — sauvegardés avant
+  modification (`external.xml.backup_pretrunk_20260724`,
+  `vars.xml.backup_pretls_20260724`).
+
+Écart vs plan : pas de génération dynamique de gateway via mod_xml_curl (section
+`configuration`/`sofia.conf`) — le fichier gateway est écrit à la main sur le
+serveur, comme le catalogue de modèles Grandstream (TASK-023.18) a dû être codé en
+dur. Si plusieurs trunks/tenants doivent être ajoutés fréquemment à l'avenir, ça
+vaudra la peine de rendre `sofia.conf` dynamique via xml_curl plutôt que de
+continuer à écrire des fichiers à la main.
+
+Reste à faire :
+- Tester un vrai appel entrant sur le DID `15143222112` et un appel sortant réel
+  depuis un poste t1001 (pas encore fait au moment d'écrire cette entrée).
+- Router l'InboundRoute vers une destination définitive une fois les tests validés
+  (actuellement pointé sur `t1001-100` par défaut).
+- Portage de vrais DID de production PSTN (mentionné par l'utilisateur comme étape
+  future, pas actuelle : "je vais transférer des DID pour tester avec le PSTN mais
+  on est pas là encore").
+
+Fichiers : sipv/backend/app/api/v1/endpoints/trunks.py,
+api/v1/endpoints/xml_curl.py (+ script ponctuel de création DB, supprimé du serveur
+après exécution). Config serveur (hors git) : `/usr/local/freeswitch/conf/vars.xml`,
+`sip_profiles/external.xml`, `sip_profiles/external/t1001-gw-1e083163.xml`.
