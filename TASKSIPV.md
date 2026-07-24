@@ -1869,6 +1869,16 @@ Testé en direct : `GET /provisioning/by-extension/{id}` appelé avec `X-Api-Key
 pas de 401/403. Les 3 postes de test restent `Registered`.
 Fichiers : sipv/backend/app/api/v1/endpoints/provisioning.py.
 
+### TASK-023.20 [x] Accès proxy ERPCRM pour les groupes d'appel (ring groups)
+Même préparation que TASK-023.19 mais pour les 7 endpoints `ring-groups` (list/
+create/update/delete + membres) — basculés vers `get_current_user_or_service`,
+`created_by=user.email if user else "erpcrm-proxy"` (même repli que TASK-023.4).
+
+Testé en direct : `GET /ivr/ring-groups/tenant/{id}` appelé avec `X-Api-Key` seul
+(pas de JWT) -- liste vide retournée correctement, pas de 401/403. Les 3 postes de
+test restent `Registered`.
+Fichiers : sipv/backend/app/api/v1/endpoints/ivr.py.
+
 ### TASK-S011.4 [ ] Auto-provisioning Grandstream (fichier cfg<MAC>.xml, zero-touch)
 Demande de l'utilisateur (2026-07-24) : configuration réseau automatique du téléphone
 au lieu de la configuration manuelle qu'on vient de faire à la main pour le GXP2135 —

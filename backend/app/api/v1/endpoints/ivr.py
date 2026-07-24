@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from app.core.database import get_db
-from app.api.v1.endpoints.auth import get_current_user
+from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
 from app.models.ivr import IVR, IVROption, Queue, QueueMember, RingGroup, RingGroupMember
 from app.models.pending_change import PendingChange
 from app.models.sip import SIPExtension
@@ -346,7 +346,7 @@ def _rg_out(r: RingGroup) -> RingGroupOut:
 
 
 @router.get("/ring-groups/tenant/{tenant_id}", response_model=list[RingGroupOut])
-async def list_ring_groups(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def list_ring_groups(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(
         select(RingGroup).options(selectinload(RingGroup.ring_members).selectinload(RingGroupMember.extension))
         .where(RingGroup.tenant_id == tenant_id).order_by(RingGroup.extension)
@@ -355,7 +355,7 @@ async def list_ring_groups(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_
 
 
 @router.put("/ring-groups/{rg_id}", response_model=RingGroupOut)
-async def update_ring_group(rg_id: uuid.UUID, payload: RingGroupUpdate, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+async def update_ring_group(rg_id: uuid.UUID, payload: RingGroupUpdate, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(
         select(RingGroup).options(selectinload(RingGroup.ring_members).selectinload(RingGroupMember.extension))
         .where(RingGroup.id == rg_id)
@@ -366,13 +366,13 @@ async def update_ring_group(rg_id: uuid.UUID, payload: RingGroupUpdate, db: Asyn
     for k, v in payload.model_dump(exclude_unset=True).items():
         setattr(rg, k, v)
     db.add(PendingChange(tenant_id=rg.tenant_id, change_type="update_ring_group", entity_type="ring_group",
-                         entity_id=str(rg_id), payload=payload.model_dump(exclude_unset=True), created_by=user.email))
+                         entity_id=str(rg_id), payload=payload.model_dump(exclude_unset=True), created_by=user.email if user else "erpcrm-proxy"))
     await db.commit()
     return _rg_out(rg)
 
 
 @router.post("/ring-groups/{rg_id}/members", response_model=RingGroupMemberOut, status_code=status.HTTP_201_CREATED)
-async def add_ring_group_member(rg_id: uuid.UUID, payload: RingGroupMemberCreate, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+async def add_ring_group_member(rg_id: uuid.UUID, payload: RingGroupMemberCreate, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
     rg = await db.get(RingGroup, rg_id)
     if not rg:
         raise HTTPException(status_code=404, detail="Groupe d'appels introuvable")
@@ -382,7 +382,7 @@ async def add_ring_group_member(rg_id: uuid.UUID, payload: RingGroupMemberCreate
     m = RingGroupMember(ring_group_id=rg_id, **payload.model_dump())
     db.add(m)
     db.add(PendingChange(tenant_id=rg.tenant_id, change_type="add_ring_group_member", entity_type="ring_group",
-                         entity_id=str(rg_id), payload={"extension_username": ext.username}, created_by=user.email))
+                         entity_id=str(rg_id), payload={"extension_username": ext.username}, created_by=user.email if user else "erpcrm-proxy"))
     await db.commit()
     await db.refresh(m)
     return RingGroupMemberOut(id=m.id, extension_id=m.extension_id, extension_username=ext.username,
@@ -390,7 +390,7 @@ async def add_ring_group_member(rg_id: uuid.UUID, payload: RingGroupMemberCreate
 
 
 @router.put("/ring-groups/members/{member_id}", response_model=RingGroupMemberOut)
-async def update_ring_group_member(member_id: uuid.UUID, payload: RingGroupMemberUpdate, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+async def update_ring_group_member(member_id: uuid.UUID, payload: RingGroupMemberUpdate, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(RingGroupMember).where(RingGroupMember.id == member_id))
     m = result.scalar_one_or_none()
     if not m:
@@ -400,7 +400,7 @@ async def update_ring_group_member(member_id: uuid.UUID, payload: RingGroupMembe
     ext = await db.get(SIPExtension, m.extension_id)
     rg = await db.get(RingGroup, m.ring_group_id)
     db.add(PendingChange(tenant_id=rg.tenant_id, change_type="update_ring_group_member", entity_type="ring_group",
-                         entity_id=str(m.ring_group_id), payload=payload.model_dump(exclude_unset=True), created_by=user.email))
+                         entity_id=str(m.ring_group_id), payload=payload.model_dump(exclude_unset=True), created_by=user.email if user else "erpcrm-proxy"))
     await db.commit()
     await db.refresh(m)
     return RingGroupMemberOut(id=m.id, extension_id=m.extension_id, extension_username=ext.username if ext else "",
@@ -408,27 +408,27 @@ async def update_ring_group_member(member_id: uuid.UUID, payload: RingGroupMembe
 
 
 @router.delete("/ring-groups/members/{member_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def remove_ring_group_member(member_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+async def remove_ring_group_member(member_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(RingGroupMember).where(RingGroupMember.id == member_id))
     m = result.scalar_one_or_none()
     if not m:
         raise HTTPException(status_code=404, detail="Membre introuvable")
     rg = await db.get(RingGroup, m.ring_group_id)
     db.add(PendingChange(tenant_id=rg.tenant_id, change_type="remove_ring_group_member", entity_type="ring_group",
-                         entity_id=str(m.ring_group_id), payload={"member_id": str(member_id)}, created_by=user.email))
+                         entity_id=str(m.ring_group_id), payload={"member_id": str(member_id)}, created_by=user.email if user else "erpcrm-proxy"))
     await db.delete(m)
     await db.commit()
 
 
 @router.post("/ring-groups/tenant/{tenant_id}", response_model=RingGroupOut, status_code=status.HTTP_201_CREATED)
-async def create_ring_group(tenant_id: uuid.UUID, payload: RingGroupCreate, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+async def create_ring_group(tenant_id: uuid.UUID, payload: RingGroupCreate, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
     rg = RingGroup(tenant_id=tenant_id, name=payload.name, extension=payload.extension,
                    ring_strategy=payload.ring_strategy, ring_time=payload.ring_time,
                    members=",".join(payload.members), no_answer_destination=payload.no_answer_destination,
                    confirm_before_answer=payload.confirm_before_answer, schedule_id=payload.schedule_id)
     db.add(rg)
     db.add(PendingChange(tenant_id=tenant_id, change_type="add_ring_group", entity_type="ring_group",
-                         entity_id=str(rg.id), payload={"extension": payload.extension, "members": payload.members}, created_by=user.email))
+                         entity_id=str(rg.id), payload={"extension": payload.extension, "members": payload.members}, created_by=user.email if user else "erpcrm-proxy"))
     await db.commit()
     result = await db.execute(
         select(RingGroup).options(selectinload(RingGroup.ring_members).selectinload(RingGroupMember.extension))
@@ -438,12 +438,12 @@ async def create_ring_group(tenant_id: uuid.UUID, payload: RingGroupCreate, db: 
 
 
 @router.delete("/ring-groups/{rg_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_ring_group(rg_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+async def delete_ring_group(rg_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(RingGroup).where(RingGroup.id == rg_id))
     rg = result.scalar_one_or_none()
     if not rg:
         raise HTTPException(status_code=404, detail="Groupe d'appels introuvable")
     db.add(PendingChange(tenant_id=rg.tenant_id, change_type="remove_ring_group", entity_type="ring_group",
-                         entity_id=str(rg_id), payload={"name": rg.name}, created_by=user.email))
+                         entity_id=str(rg_id), payload={"name": rg.name}, created_by=user.email if user else "erpcrm-proxy"))
     await db.delete(rg)
     await db.commit()
