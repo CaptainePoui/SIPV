@@ -49,6 +49,13 @@ class SIPExtension(Base):
     # --- TASK-S018.3 : identification, plan d'appel, renvois, DND ---
     site: Mapped[str | None] = mapped_column(String(100))
     description: Mapped[str | None] = mapped_column(Text)
+    # --- TASK-023.14 : langue d'affichage, fuseau horaire, nom independant du contact ---
+    display_language: Mapped[str] = mapped_column(String(5), default="fr", server_default="fr")
+    timezone: Mapped[str | None] = mapped_column(String(50))  # null = America/Montreal (defaut projet)
+    # False (defaut) = `name` suit automatiquement le nom du contact ERPCRM lie
+    # (sync.py::erpcrm_event, action contact_name_changed) ; True = "autre" -- le nom
+    # reste tel que saisi manuellement, jamais ecrase par la synchronisation.
+    name_override: Mapped[bool] = mapped_column(Boolean, default=False)
     # Palier d'appel -- local/national/international. ⚠️ PAS ENCORE APPLIQUE par le
     # dialplan (OutboundRoute n'a aucun concept de palier) -- champ stocke + reflete
     # dans le XML directory (toll_allow) mais decoratif tant que TASK-S018.4 (ou

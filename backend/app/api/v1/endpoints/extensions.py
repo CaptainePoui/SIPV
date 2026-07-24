@@ -70,6 +70,9 @@ class ExtOut(BaseModel):
     created_at: datetime
     site: str | None
     description: str | None
+    display_language: str
+    timezone: str | None
+    name_override: bool
     call_permission: str
     forward_immediate_enabled: bool
     forward_immediate_destination: str | None
@@ -146,6 +149,9 @@ class ExtCreate(BaseModel):
     password: str | None = None  # auto-generated if not provided
     site: str | None = None
     description: str | None = None
+    display_language: str = "fr"
+    timezone: str | None = None
+    name_override: bool = False
     call_permission: str = "international"  # local, national, international -- pas encore applique par le dialplan
     forward_immediate_enabled: bool = False
     forward_immediate_destination: str | None = None
@@ -217,6 +223,9 @@ class ExtUpdate(BaseModel):
     password: str | None = None
     site: str | None = None
     description: str | None = None
+    display_language: str | None = None
+    timezone: str | None = None
+    name_override: bool | None = None
     call_permission: str | None = None
     forward_immediate_enabled: bool | None = None
     forward_immediate_destination: str | None = None
@@ -281,7 +290,9 @@ def _out(e: SIPExtension, groups: list[str] | None = None) -> ExtOut:
         is_active=e.is_active, codec_list=e.codec_list, transport=e.transport, schedule_id=e.schedule_id,
         erpcrm_contact_id=e.erpcrm_contact_id,
         freeswitch_synced=e.freeswitch_synced, created_at=e.created_at,
-        site=e.site, description=e.description, call_permission=e.call_permission,
+        site=e.site, description=e.description,
+        display_language=e.display_language, timezone=e.timezone, name_override=e.name_override,
+        call_permission=e.call_permission,
         forward_immediate_enabled=e.forward_immediate_enabled, forward_immediate_destination=e.forward_immediate_destination,
         forward_immediate_destination_type=e.forward_immediate_destination_type,
         forward_busy_enabled=e.forward_busy_enabled, forward_busy_destination=e.forward_busy_destination,
@@ -352,6 +363,9 @@ def _snapshot(e: SIPExtension) -> dict:
         "schedule_id": str(e.schedule_id) if e.schedule_id else None,
         "site": e.site,
         "description": e.description,
+        "display_language": e.display_language,
+        "timezone": e.timezone,
+        "name_override": e.name_override,
         "call_permission": e.call_permission,
         "forward_immediate_enabled": e.forward_immediate_enabled,
         "forward_immediate_destination": e.forward_immediate_destination,

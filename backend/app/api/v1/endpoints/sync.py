@@ -107,8 +107,13 @@ async def erpcrm_event(payload: ERPCRMEvent, db: AsyncSession = Depends(get_db),
     for ext in extensions:
         first = payload.data.get("first_name")
         last = payload.data.get("last_name")
-        if first or last:
-            ext.caller_id_name = f"{first or ''} {last or ''}".strip()
+        full_name = f"{first or ''} {last or ''}".strip()
+        if full_name:
+            ext.caller_id_name = full_name
+            # TASK-023.14 : "autre" -- le poste peut avoir un nom different de celui
+            # du contact ERPCRM lie ; name_override=True protege `name` de ce sync.
+            if not ext.name_override:
+                ext.name = full_name
         ext.freeswitch_synced = False
         updated.append(ext.username)
 

@@ -1881,6 +1881,34 @@ touché ici). Les 3 postes de test restent `Registered`.
 Fichiers : sipv/backend/app/models/provisioning.py, api/v1/endpoints/provisioning.py,
 alembic/versions/0036_phone_device_type.py.
 
+### TASK-023.14 [x] Identification : langue d'affichage, fuseau horaire, nom "autre"
+Migration `0037_ext_identification` : `display_language` (défaut `"fr"`, langue de
+l'écran du téléphone -- distinct de `VoicemailBox.language`), `timezone` (nullable,
+défaut projet America/Montreal si absent, pas de niveau d'héritage compagnie ajouté
+ici -- champ d'affichage simple, pas de logique métier dessus), `name_override`.
+
+`name_override` résout la demande "nom du poste même que le contact, checkbox pour
+autre" : par défaut (`false`), `sync.py::erpcrm_event` (action `contact_name_changed`,
+TASK-S022) met à jour `SIPExtension.name` EN PLUS de `caller_id_name` quand le
+contact ERPCRM lié change de nom ; si `name_override=true`, `name` reste protégé
+(saisi manuellement) mais `caller_id_name` continue de suivre le contact (les deux
+notions restent indépendantes).
+⚠️ Limite pré-existante non résolue ici (déjà notée dans TASK-018 TASKERPCRM.md) :
+rien côté ERPCRM n'appelle encore `POST /sync/erpcrm-event` quand un contact change
+de nom -- le mécanisme de sync existe et fonctionne (testé ci-dessous en appelant
+l'endpoint directement), mais n'est pas encore déclenché automatiquement à la
+source. Hors scope de cette tâche (identification du poste), pas inventé pour
+combler ce gap.
+
+Testé en direct sur t1001-101 (contact lié "Test Deux") : appel direct de
+`/sync/erpcrm-event` avec `name_override=false` -> `name` ET `caller_id_name` mis à
+jour ("Nouveau Nom") ; puis `name_override=true` + nouvel événement -> `name` reste
+protégé ("Nouveau Nom" inchangé) MAIS `caller_id_name` suit quand même ("Autre
+Personne"). Tout remis à l'état initial ("Test Deux") après vérification. Les 3
+postes de test restent `Registered`.
+Fichiers : sipv/backend/app/models/sip.py, api/v1/endpoints/sync.py,
+api/v1/endpoints/extensions.py, alembic/versions/0037_ext_identification.py.
+
 ### TASK-S008.2 [x] Voicemail — accueils audio, langue, politique globale/compagnie/poste
 Dépend de : TASK-S008, décision transverse (héritage de settings, résolue plus haut)
 
