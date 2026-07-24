@@ -73,13 +73,17 @@ class ExtOut(BaseModel):
     call_permission: str
     forward_immediate_enabled: bool
     forward_immediate_destination: str | None
+    forward_immediate_destination_type: str
     forward_busy_enabled: bool
     forward_busy_destination: str | None
+    forward_busy_destination_type: str
     forward_no_answer_enabled: bool
     forward_no_answer_destination: str | None
+    forward_no_answer_destination_type: str
     forward_no_answer_delay_seconds: int | None
     forward_offline_enabled: bool
     forward_offline_destination: str | None
+    forward_offline_destination_type: str
     dnd_enabled: bool
     dnd_locked: bool
     auto_answer_enabled: bool
@@ -129,13 +133,17 @@ class ExtCreate(BaseModel):
     call_permission: str = "international"  # local, national, international -- pas encore applique par le dialplan
     forward_immediate_enabled: bool = False
     forward_immediate_destination: str | None = None
+    forward_immediate_destination_type: str = "extension"
     forward_busy_enabled: bool = False
     forward_busy_destination: str | None = None
+    forward_busy_destination_type: str = "extension"
     forward_no_answer_enabled: bool = False
     forward_no_answer_destination: str | None = None
+    forward_no_answer_destination_type: str = "voicemail"
     forward_no_answer_delay_seconds: int | None = 20
     forward_offline_enabled: bool = False
     forward_offline_destination: str | None = None
+    forward_offline_destination_type: str = "voicemail"
     dnd_enabled: bool = False
     dnd_locked: bool = False
     auto_answer_enabled: bool = False
@@ -182,13 +190,17 @@ class ExtUpdate(BaseModel):
     call_permission: str | None = None
     forward_immediate_enabled: bool | None = None
     forward_immediate_destination: str | None = None
+    forward_immediate_destination_type: str | None = None
     forward_busy_enabled: bool | None = None
     forward_busy_destination: str | None = None
+    forward_busy_destination_type: str | None = None
     forward_no_answer_enabled: bool | None = None
     forward_no_answer_destination: str | None = None
+    forward_no_answer_destination_type: str | None = None
     forward_no_answer_delay_seconds: int | None = None
     forward_offline_enabled: bool | None = None
     forward_offline_destination: str | None = None
+    forward_offline_destination_type: str | None = None
     dnd_enabled: bool | None = None
     dnd_locked: bool | None = None
     auto_answer_enabled: bool | None = None
@@ -227,10 +239,14 @@ def _out(e: SIPExtension, groups: list[str] | None = None) -> ExtOut:
         freeswitch_synced=e.freeswitch_synced, created_at=e.created_at,
         site=e.site, description=e.description, call_permission=e.call_permission,
         forward_immediate_enabled=e.forward_immediate_enabled, forward_immediate_destination=e.forward_immediate_destination,
+        forward_immediate_destination_type=e.forward_immediate_destination_type,
         forward_busy_enabled=e.forward_busy_enabled, forward_busy_destination=e.forward_busy_destination,
+        forward_busy_destination_type=e.forward_busy_destination_type,
         forward_no_answer_enabled=e.forward_no_answer_enabled, forward_no_answer_destination=e.forward_no_answer_destination,
+        forward_no_answer_destination_type=e.forward_no_answer_destination_type,
         forward_no_answer_delay_seconds=e.forward_no_answer_delay_seconds,
         forward_offline_enabled=e.forward_offline_enabled, forward_offline_destination=e.forward_offline_destination,
+        forward_offline_destination_type=e.forward_offline_destination_type,
         dnd_enabled=e.dnd_enabled, dnd_locked=e.dnd_locked, auto_answer_enabled=e.auto_answer_enabled,
         max_concurrent_calls=e.max_concurrent_calls, distinctive_ring=e.distinctive_ring,
         pickup_group=e.pickup_group, paging_groups=e.paging_groups, can_intercept_calls=e.can_intercept_calls,
@@ -289,13 +305,17 @@ def _snapshot(e: SIPExtension) -> dict:
         "call_permission": e.call_permission,
         "forward_immediate_enabled": e.forward_immediate_enabled,
         "forward_immediate_destination": e.forward_immediate_destination,
+        "forward_immediate_destination_type": e.forward_immediate_destination_type,
         "forward_busy_enabled": e.forward_busy_enabled,
         "forward_busy_destination": e.forward_busy_destination,
+        "forward_busy_destination_type": e.forward_busy_destination_type,
         "forward_no_answer_enabled": e.forward_no_answer_enabled,
         "forward_no_answer_destination": e.forward_no_answer_destination,
+        "forward_no_answer_destination_type": e.forward_no_answer_destination_type,
         "forward_no_answer_delay_seconds": e.forward_no_answer_delay_seconds,
         "forward_offline_enabled": e.forward_offline_enabled,
         "forward_offline_destination": e.forward_offline_destination,
+        "forward_offline_destination_type": e.forward_offline_destination_type,
         "dnd_enabled": e.dnd_enabled,
         "dnd_locked": e.dnd_locked,
         "auto_answer_enabled": e.auto_answer_enabled,

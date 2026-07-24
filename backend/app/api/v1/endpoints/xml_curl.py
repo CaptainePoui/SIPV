@@ -394,7 +394,7 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession, r
 
     ctx = xe(requested_context or f"internal-{account}")
     domain = xe(account)
-    ext_entries = _ext_dialplan_entries(extensions, domain, caller_ext)
+    ext_entries = _ext_dialplan_entries(extensions, domain, account, ctx, caller_ext)
     rg_entries = _ringgroup_dialplan_entries(ring_groups, domain)
     gate_entries = await _call_permission_gate_entries(caller_ext, tenant, out_routes, account, db)
     outbound_entries = _outbound_dialplan_entries(out_routes, account, caller_ext)
@@ -438,7 +438,28 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession, r
     return _resp(xml)
 
 
-def _ext_dialplan_entries(extensions: list, domain: str, caller_ext: "SIPExtension | None" = None) -> str:
+# Types de destination geres pour les renvois (TASK-023.6). "external" (aucun trunk
+# reellement provisionne/actif dans ce projet pour l'instant -- appels externes
+# reportes, voir TASKSIPV "Points critiques") et queue/ivr/recording (pas de
+# convention de resolution etablie) sont acceptes en stockage (champ libre, voir
+# extensions.py) mais PAS encore resolus ici -- si un de ces types est choisi, le
+# renvoi n'est pas applique et le poste sonne normalement (repli sur le comportement
+# existant plutot qu'un bridge devine/casse).
+def _forward_action_xml(dest_type: str, dest_value: str | None, ext: "SIPExtension", domain: str, account: str, ctx: str) -> str | None:
+    """Retourne le fragment <action .../> qui redirige l'appel vers la destination
+    de renvoi, ou None si le type n'est pas encore supporte / valeur manquante."""
+    value = (dest_value or "").strip()
+    if dest_type == "voicemail":
+        target = value or ext.username
+        return f'<action application="voicemail" data="default ${{domain_name}} {xe(target)}"/>'
+    if dest_type == "extension" and value:
+        return f'<action application="bridge" data="{_bridge(f"{account}-{value}", domain)}"/>'
+    if dest_type == "ring_group" and value:
+        return f'<action application="execute_extension" data="{xe(f"rg_{value}")} XML {ctx}"/>'
+    return None
+
+
+def _ext_dialplan_entries(extensions: list, domain: str, account: str, ctx: str, caller_ext: "SIPExtension | None" = None) -> str:
     # Enregistrement automatique "interne" (TASK-023.4) : declenche si le poste
     # APPELANT a active le sortant, OU si le poste APPELE (destinataire de cette
     # entree) a active l'entrant -- soit l'un soit l'autre suffit.
@@ -447,11 +468,32 @@ def _ext_dialplan_entries(extensions: list, domain: str, caller_ext: "SIPExtensi
     for ext in extensions:
         name = xe(f"ext_{ext.extension}")
         num = xe(ext.extension)
+        record_action = _record_action(caller_wants_record or ext.record_internal_incoming)
+
+        # --- TASK-023.6 : renvoi immediat / DND -- le poste ne sonne PAS du tout,
+        # redirige tout de suite. Ne change RIEN pour un poste sans renvoi/DND actif
+        # (comportement identique a avant cette tache -- verifie explicitement pour
+        # ne pas casser les postes existants qui n'ont ni l'un ni l'autre configure).
+        diversion = None
+        if ext.forward_immediate_enabled:
+            diversion = _forward_action_xml(ext.forward_immediate_destination_type, ext.forward_immediate_destination, ext, domain, account, ctx)
+        elif ext.dnd_enabled:
+            # DND sans renvoi immediat configure -- va a la boite vocale si activee, sinon occupe.
+            diversion = '<action application="voicemail" data="default ${domain_name} ' + xe(ext.username) + '"/>' if ext.voicemail_enabled else '<action application="respond" data="486 Busy Here"/>'
+
+        if diversion:
+            entries.append(f"""      <!-- Extension {ext.extension}: {xe(ext.name)} (renvoi immediat/DND) -->
+      <extension name="{name}">
+        <condition field="destination_number" expression="^{num}$">{record_action}
+          {diversion}
+        </condition>
+      </extension>""")
+            continue
+
         bridge = _bridge(ext.username, domain)
         vm_action = ""
         if ext.voicemail_enabled:
             vm_action = f'\n          <action application="voicemail" data="default ${{domain_name}} {xe(ext.username)}"/>'
-        record_action = _record_action(caller_wants_record or ext.record_internal_incoming)
         entries.append(f"""      <!-- Extension {ext.extension}: {xe(ext.name)} -->
       <extension name="{name}">
         <condition field="destination_number" expression="^{num}$">

@@ -1612,6 +1612,51 @@ Fichiers : sipv/backend/app/models/sip.py, models/tenant.py,
 api/v1/endpoints/xml_curl.py, api/v1/endpoints/extensions.py,
 api/v1/endpoints/tenants.py, alembic/versions/0030_caller_id_split_s018_6.py.
 
+### TASK-S023.6 [~] Typer les destinations de renvoi + cabler renvoi immediat/DND
+Demande de l'utilisateur (meme "mega prompt") : les 4 destinations de renvoi
+(`forward_*_destination`, S018.3) etaient du texte libre, pas typees (poste/BV/
+externe/groupe d'appel/file/IVR/message demande dans la spec) -- et surtout, AUCUN
+des 4 renvois n'etait reellement applique au dialplan malgre le champ `enabled`
+(juste stocke, comme note honnetement dans S018.3).
+
+Fait (migration `0031_forward_destination_types`) :
+- 4 nouveaux champs `forward_*_destination_type` (defaut `extension` pour immediat/
+  occupe, `voicemail` pour non-repondu/hors-ligne -- comportement le plus utile par
+  defaut).
+- `xml_curl.py::_forward_action_xml()` resout SEULEMENT 3 types pour l'instant :
+  `extension` (bridge vers un autre poste), `voicemail` (boite vocale, du poste
+  cible ou de soi-meme si vide), `ring_group` (reutilise l'entree `rg_<numero>` deja
+  generee par `_ringgroup_dialplan_entries` via `execute_extension`). `external`
+  (aucun trunk reel actif dans ce projet pour l'instant), `queue`/`ivr`/`message`
+  (aucune convention de resolution etablie) sont acceptes en stockage mais PAS
+  resolus -- si choisis, le renvoi ne s'applique pas et le poste sonne normalement
+  (repli honnete, pas un bridge invente/casse).
+- `_ext_dialplan_entries()` : SEULEMENT le renvoi IMMEDIAT et le DND sont reellement
+  cables (le poste ne sonne pas du tout, redirige tout de suite -- pas besoin de
+  detecter occupe/non-repondu). DND sans renvoi immediat configure va a la boite
+  vocale si activee, sinon `486 Busy Here`.
+- ⚠️ [~] et pas [x] : renvoi SUR OCCUPE et SUR NON-REPONSE restent stockes/typés
+  mais PAS cables -- ils necessitent le patron FreeSWITCH bridge+`continue_on_fail`+
+  verification de `${originate_disposition}` (ou conditions `<condition>` chainees
+  dans la meme extension), plus intrusif sur la logique de bridge PARTAGEE par TOUS
+  les postes (risque de casser l'appel interne normal si mal ecrit) et impossible a
+  verifier honnetement dans cette session (aucun moyen simple de simuler un vrai
+  "occupe" ou "non-repondu" avec les softphones de test qui ne repondent pas
+  automatiquement). Pas fait a la sauvette -- a reprendre avec un vrai scenario de
+  test (deux appels simultanes pour "occupe", laisser sonner pour "non-repondu").
+
+Deploye et teste en direct : migration 0031 appliquee, sipv-backend + sipv-backend-tls
+redemarres, les 3 postes de test restent `Registered`. Verifie que le cas de base
+(aucun renvoi configure) produit une entree dialplan STRICTEMENT IDENTIQUE a avant
+cette tache (aucune regression). Bascule reelle testee : `forward_immediate_enabled=
+true` + destination extension `100` pose sur t1001-101 -> l'entree dialplan generee
+bridge directement vers `100` au lieu de sonner `101` ; remis a `false`/`NULL` apres
+verification.
+Reste a faire : busy/no_answer wiring (voir ci-dessus) ; exposer les selecteurs de
+type sur ERPCRM (TASK-023.5/ContactDetail.jsx).
+Fichiers : sipv/backend/app/models/sip.py, api/v1/endpoints/xml_curl.py,
+api/v1/endpoints/extensions.py, alembic/versions/0031_forward_destination_types.py.
+
 ### TASK-S011.2 [x] Fiche physique du poste (ProvisionedPhone étendu)
 Dépend de : TASK-S011 (provisioning existant)
 Champs ajoutés sur `ProvisionedPhone` (migration `0021_phone_physical`, appliquée sur
