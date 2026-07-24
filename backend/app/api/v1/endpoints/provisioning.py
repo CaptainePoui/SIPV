@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.config import settings
 from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
-from app.models.provisioning import PhoneModel, ProvisionedPhone, PhoneButton
+from app.models.provisioning import PhoneModel, ProvisionedPhone, PhoneButton, PhoneButtonTemplate, PhoneButtonTemplateItem
 from app.models.sip import SIPExtension
 from app.models.user import User
 
@@ -412,3 +412,123 @@ async def delete_phone_button(button_id: uuid.UUID, db: AsyncSession = Depends(g
         raise HTTPException(status_code=404, detail="Bouton introuvable")
     await db.delete(b)
     await db.commit()
+
+
+# ── Templates de boutons (TASK-023.25) ──────────────────────────────────────────
+
+class ButtonTemplateItemOut(BaseModel):
+    id: uuid.UUID
+    position: int
+    page: int
+    button_type: str
+    label: str | None
+    value: str | None
+    destination: str | None
+    sip_account_index: int
+    client_editable: bool
+    locked_by_simpleip: bool
+
+class ButtonTemplateOut(BaseModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    name: str
+    created_at: datetime
+    items: list[ButtonTemplateItemOut] = []
+
+class ButtonTemplateCreate(BaseModel):
+    name: str
+
+class SaveAsTemplatePayload(BaseModel):
+    name: str
+
+
+def _template_out(t: PhoneButtonTemplate) -> ButtonTemplateOut:
+    return ButtonTemplateOut(
+        id=t.id, tenant_id=t.tenant_id, name=t.name, created_at=t.created_at,
+        items=[
+            ButtonTemplateItemOut(
+                id=i.id, position=i.position, page=i.page, button_type=i.button_type,
+                label=i.label, value=i.value, destination=i.destination,
+                sip_account_index=i.sip_account_index, client_editable=i.client_editable,
+                locked_by_simpleip=i.locked_by_simpleip,
+            ) for i in (t.items or [])
+        ],
+    )
+
+
+@router.get("/button-templates/tenant/{tenant_id}", response_model=list[ButtonTemplateOut])
+async def list_button_templates(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    result = await db.execute(
+        select(PhoneButtonTemplate).options(selectinload(PhoneButtonTemplate.items))
+        .where(PhoneButtonTemplate.tenant_id == tenant_id).order_by(PhoneButtonTemplate.name)
+    )
+    return [_template_out(t) for t in result.scalars().all()]
+
+
+@router.delete("/button-templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_button_template(template_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    result = await db.execute(select(PhoneButtonTemplate).where(PhoneButtonTemplate.id == template_id))
+    t = result.scalar_one_or_none()
+    if not t:
+        raise HTTPException(status_code=404, detail="Template introuvable")
+    await db.delete(t)
+    await db.commit()
+
+
+@router.post("/{phone_id}/save-as-template", response_model=ButtonTemplateOut, status_code=status.HTTP_201_CREATED)
+async def save_phone_as_template(phone_id: uuid.UUID, payload: SaveAsTemplatePayload, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    """Sauvegarde la config de boutons actuelle d'un telephone comme template reutilisable."""
+    phone = await db.get(ProvisionedPhone, phone_id)
+    if not phone:
+        raise HTTPException(status_code=404, detail="Téléphone introuvable")
+    result = await db.execute(select(PhoneButton).where(PhoneButton.provisioned_phone_id == phone_id))
+    buttons = result.scalars().all()
+    t = PhoneButtonTemplate(tenant_id=phone.tenant_id, name=payload.name)
+    db.add(t)
+    await db.flush()
+    for b in buttons:
+        db.add(PhoneButtonTemplateItem(
+            template_id=t.id, position=b.position, page=b.page, button_type=b.button_type,
+            label=b.label, value=b.value, destination=b.destination,
+            sip_account_index=b.sip_account_index, client_editable=b.client_editable,
+            locked_by_simpleip=b.locked_by_simpleip,
+        ))
+    await db.commit()
+    result = await db.execute(select(PhoneButtonTemplate).options(selectinload(PhoneButtonTemplate.items)).where(PhoneButtonTemplate.id == t.id))
+    return _template_out(result.scalar_one())
+
+
+@router.post("/button-templates/{template_id}/apply/{phone_id}", response_model=list[PhoneButtonOut])
+async def apply_button_template(template_id: uuid.UUID, phone_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    """
+    Applique un template a un telephone -- REMPLACE les boutons existants de cet
+    appareil par ceux du template (semantique "appliquer" simple et predictible,
+    pas une fusion).
+    """
+    result = await db.execute(select(PhoneButtonTemplate).options(selectinload(PhoneButtonTemplate.items)).where(PhoneButtonTemplate.id == template_id))
+    t = result.scalar_one_or_none()
+    if not t:
+        raise HTTPException(status_code=404, detail="Template introuvable")
+    phone = await db.get(ProvisionedPhone, phone_id)
+    if not phone:
+        raise HTTPException(status_code=404, detail="Téléphone introuvable")
+
+    existing = await db.execute(select(PhoneButton).where(PhoneButton.provisioned_phone_id == phone_id))
+    for b in existing.scalars().all():
+        await db.delete(b)
+    await db.flush()
+
+    new_buttons = []
+    for item in t.items:
+        b = PhoneButton(
+            provisioned_phone_id=phone_id, position=item.position, page=item.page,
+            button_type=item.button_type, label=item.label, value=item.value,
+            destination=item.destination, sip_account_index=item.sip_account_index,
+            client_editable=item.client_editable, locked_by_simpleip=item.locked_by_simpleip,
+        )
+        db.add(b)
+        new_buttons.append(b)
+    await db.commit()
+    for b in new_buttons:
+        await db.refresh(b)
+    return [_button_out(b) for b in new_buttons]

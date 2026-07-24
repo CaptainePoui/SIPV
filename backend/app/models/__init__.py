@@ -7,7 +7,7 @@ from app.models.ivr import IVR, IVROption, Queue, QueueMember, RingGroup, RingGr
 from app.models.voicemail import VoicemailBox, VoicemailMessage
 from app.models.cdr import CDR, RatePrefix
 from app.models.e911 import E911Address, DID911Assignment, ExtensionE911Assignment
-from app.models.provisioning import PhoneModel, ProvisionedPhone, PhoneButton
+from app.models.provisioning import PhoneModel, ProvisionedPhone, PhoneButton, PhoneButtonTemplate, PhoneButtonTemplateItem
 from app.models.recording import RecordingPolicy, CallRecording
 from app.models.fax import FaxLine, FaxJob
 from app.models.sms import SMSConfig, SMSMessage

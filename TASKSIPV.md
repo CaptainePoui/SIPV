@@ -1918,6 +1918,31 @@ Fichiers : sipv/backend/app/models/ivr.py, models/__init__.py,
 api/v1/endpoints/xml_curl.py, api/v1/endpoints/ivr.py,
 alembic/versions/0040_paging_groups.py.
 
+### TASK-023.25 [x] Templates de configuration de boutons (sauvegarder/appliquer)
+Dernier morceau de la demande boutons (TASK-023.17) : "je vais pouvoir créer une
+config de bouton et le mettre en template pour l'activer sur d'autres".
+
+Fait (migration `0041_button_templates`) : `PhoneButtonTemplate` (nom + tenant) +
+`PhoneButtonTemplateItem` (mêmes champs qu'un `PhoneButton`, sans rattachement à un
+appareil précis). Endpoints :
+- `GET /provisioning/button-templates/tenant/{tenant_id}` (liste)
+- `DELETE /provisioning/button-templates/{template_id}`
+- `POST /provisioning/{phone_id}/save-as-template` -- copie les boutons ACTUELS
+  d'un téléphone dans un nouveau template nommé.
+- `POST /provisioning/button-templates/{template_id}/apply/{phone_id}` -- REMPLACE
+  les boutons existants de l'appareil cible par ceux du template (sémantique
+  "appliquer" simple et prévisible, pas une fusion qui laisserait des boutons
+  orphelins de l'ancienne config).
+
+Testé en direct de bout en bout : 2 téléphones de test créés, 2 boutons ajoutés au
+premier (BLF poste 100, composition rapide), sauvegardé comme template "Standard
+Reception", appliqué au deuxième téléphone -- les 2 boutons copiés exactement
+(mêmes valeurs, nouveaux IDs, `provisioned_phone_id` correctement réassigné).
+Template + les 2 téléphones supprimés après coup (0 ligne `phone_button_templates`/
+`phone_buttons` résiduelle). Les 3 postes de test restent `Registered`.
+Fichiers : sipv/backend/app/models/provisioning.py, models/__init__.py,
+api/v1/endpoints/provisioning.py, alembic/versions/0041_button_templates.py.
+
 ### TASK-S011.4 [ ] Auto-provisioning Grandstream (fichier cfg<MAC>.xml, zero-touch)
 Demande de l'utilisateur (2026-07-24) : configuration réseau automatique du téléphone
 au lieu de la configuration manuelle qu'on vient de faire à la main pour le GXP2135 —

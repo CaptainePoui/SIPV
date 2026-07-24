@@ -84,3 +84,36 @@ class PhoneButton(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     phone: Mapped["ProvisionedPhone"] = relationship("ProvisionedPhone", back_populates="buttons")
+
+
+class PhoneButtonTemplate(Base):
+    """Modele de configuration de boutons reutilisable (TASK-023.25) -- cree a
+    partir d'un ProvisionedPhone existant, applicable a d'autres appareils."""
+    __tablename__ = "phone_button_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    items: Mapped[list["PhoneButtonTemplateItem"]] = relationship("PhoneButtonTemplateItem", back_populates="template", cascade="all, delete-orphan")
+
+
+class PhoneButtonTemplateItem(Base):
+    """Un bouton dans un template (TASK-023.25) -- memes champs que PhoneButton,
+    sans provisioned_phone_id (pas encore attache a un appareil precis)."""
+    __tablename__ = "phone_button_template_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    template_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("phone_button_templates.id", ondelete="CASCADE"), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    page: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    button_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    label: Mapped[str | None] = mapped_column(String(60))
+    value: Mapped[str | None] = mapped_column(String(100))
+    destination: Mapped[str | None] = mapped_column(String(100))
+    sip_account_index: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    client_editable: Mapped[bool] = mapped_column(Boolean, default=False)
+    locked_by_simpleip: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    template: Mapped["PhoneButtonTemplate"] = relationship("PhoneButtonTemplate", back_populates="items")
