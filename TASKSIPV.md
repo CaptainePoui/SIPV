@@ -1496,7 +1496,7 @@ vs par défaut ; enregistrement auto vs manuel (`record_calls` existe déjà en 
 Fichiers cibles : sipv/backend/app/models/sip.py, api/v1/endpoints/extensions.py,
 sipv/frontend (fiche extension unifiée existante, TASK-S018).
 
-### TASK-S018.5 [~] Plan d'appel reellement applique (Canada/US/international/premium/NIP/limite)
+### TASK-S018.5 [x] Plan d'appel reellement applique (Canada/US/international/premium/NIP/limite)
 Demande de l'utilisateur (2026-07-24, "mega prompt" fiche poste complete, GO explicite
 "fait le dialing plan quand tu veux") : `call_permission` (S018.3) etait stocke et
 reflete dans `toll_allow` du XML directory mais JAMAIS verifie par le dialplan --
@@ -1556,11 +1556,16 @@ Fait :
   clair a l'entree, chiffres avant stockage, jamais renvoyes en clair (`has_ld_pin`
   bool seulement, meme pattern que les mots de passe admin telephone).
 
-⚠️ [~] et pas [x] : code ecrit et syntax-checke, PAS ENCORE deploye/teste sur le
-serveur reel au moment de cet ecrit -- a faire avant de marquer [x] (rsync, migration
-0029, redemarrage sipv-backend ET sipv-backend-tls, test avec un appel simule qui
-verifie que les entrees de rejet apparaissent au bon endroit dans le XML dialplan
-retourne, sans casser les 3 postes de test TLS existants).
+Deploye et teste en direct (2026-07-24) : rsync sur le serveur reel, migration 0029
+appliquee (`alembic upgrade head` OK), sipv-backend ET sipv-backend-tls redemarres.
+Simulation directe de POST xml_curl (section=dialplan, Caller-Context=sipv-internal,
+Caller-Destination-Number=variable, variable_sip_from_user=t1001-100) confirme :
+premium (900) et international (011) rejetes par defaut (heritent du Tenant),
+Canada/US non bloques par defaut. Test de bascule reel : `allow_canada=false` pose en
+DB sur t1001-100 -> l'entree `perm_canada` apparait bien dans le XML dialplan genere
+pour un numero 514 (Montreal) ; remis a `NULL` (defaut) apres verification, confirme
+en DB. Les 3 postes de test (t1001-100, t1001-101, GXP2135/t1001-102) restent
+`Registered` sans interruption apres les 2 redemarrages de service.
 Reste a faire (documente plutot qu'invente) :
 - Portail gestionnaire (TASK-S029/S030/S031, pas encore construit) pour que le client
   reinitialise lui-meme sa limite mensuelle -- pour l'instant, seulement modifiable
