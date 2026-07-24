@@ -116,6 +116,8 @@ class QueueMemberOut(BaseModel):
     pause_reasons: str | None
     wrap_up_time_seconds: int
     skills: str | None
+    ring_even_if_busy: bool
+    allow_multiple_queue_calls: bool
 
 class QueueMemberCreate(BaseModel):
     extension_username: str
@@ -128,6 +130,8 @@ class QueueMemberCreate(BaseModel):
     pause_reasons: str | None = None
     wrap_up_time_seconds: int = 0
     skills: str | None = None
+    ring_even_if_busy: bool = False
+    allow_multiple_queue_calls: bool = False
 
 class QueueMemberUpdate(BaseModel):
     penalty: int | None = None
@@ -139,6 +143,8 @@ class QueueMemberUpdate(BaseModel):
     pause_reasons: str | None = None
     wrap_up_time_seconds: int | None = None
     skills: str | None = None
+    ring_even_if_busy: bool | None = None
+    allow_multiple_queue_calls: bool | None = None
 
 def _member_out(m: QueueMember) -> QueueMemberOut:
     return QueueMemberOut(
@@ -146,6 +152,7 @@ def _member_out(m: QueueMember) -> QueueMemberOut:
         agent_number=m.agent_number, agent_password=m.agent_password, is_dynamic=m.is_dynamic,
         auto_login=m.auto_login, pause_allowed=m.pause_allowed, pause_reasons=m.pause_reasons,
         wrap_up_time_seconds=m.wrap_up_time_seconds, skills=m.skills,
+        ring_even_if_busy=m.ring_even_if_busy, allow_multiple_queue_calls=m.allow_multiple_queue_calls,
     )
 
 class QueueOut(BaseModel):

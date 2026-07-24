@@ -2046,6 +2046,27 @@ intercept testés sur un poste réel puis remis à `null`/`true` (état par déf
 nettoyé (0 lignes `queues`/`queue_members` avant et après). Les 2 postes de test TLS
 toujours intacts.
 
+### TASK-023.10 [x] QueueMember : sonnerie même si occupé + plusieurs appels de file
+2 champs manquants identifiés lors de la réconciliation de la grande liste utilisateur
+(migration `0033_queue_ring_multi`) : `ring_even_if_busy`, `allow_multiple_queue_calls`.
+Même limite que le reste du module queue (S007.2) : stockés/éditables via API, PAS
+poussés vers `mod_callcenter` (aucun champ Queue/QueueMember ne l'est aujourd'hui).
+
+⚠️ Piège Alembic découvert en déployant (à retenir pour toute future migration) :
+`alembic_version.version_num` est `VARCHAR(32)` — mon premier nom de révision
+(`0033_queue_member_ring_multi_s023_10`, 36 caractères) a fait planter la migration
+en toute fin d'exécution (`StringDataRightTruncationError`) APRÈS que les
+`op.add_column` avaient déjà été émis dans la même transaction — DDL transactionnelle
+confirmée : tout annulé proprement (vérifié, aucune colonne orpheline). Renommé en
+`0033_queue_ring_multi` (21 caractères). Toujours garder un nom de révision ≤ 32
+caractères dans ce projet.
+
+Testé en direct : file + membre de test créés avec les 2 nouveaux champs à `true`,
+relu correctement via l'API, membre + file supprimés après coup (0 lignes
+`queues`/`queue_members`). Les 3 postes de test restent `Registered`.
+Fichiers : sipv/backend/app/models/ivr.py, api/v1/endpoints/ivr.py,
+alembic/versions/0033_queue_ring_multi.py.
+
 ### TASK-S010.2 [x] 911 par poste (pas seulement par DID)
 Dépend de : TASK-S010 (E911Address/DID911Assignment existants — liés au DID, pas au poste)
 

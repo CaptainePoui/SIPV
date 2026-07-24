@@ -83,6 +83,12 @@ class QueueMember(Base):
     pause_reasons: Mapped[str | None] = mapped_column(String(255))  # CSV, ex: "Diner,Pause,Reunion"
     wrap_up_time_seconds: Mapped[int] = mapped_column(Integer, default=0)
     skills: Mapped[str | None] = mapped_column(String(255))  # CSV
+    # --- TASK-023.10 : memes limites que le reste du module queue -- stockes/
+    # editables mais PAS encore pousses vers mod_callcenter (aucun champ de Queue/
+    # QueueMember ne l'est, voir TASK-S007.2 "rien ne pousse jamais les queues/agents
+    # vers le runtime") ---
+    ring_even_if_busy: Mapped[bool] = mapped_column(Boolean, default=False)
+    allow_multiple_queue_calls: Mapped[bool] = mapped_column(Boolean, default=False)
 
     queue: Mapped["Queue"] = relationship("Queue", back_populates="members")
 
