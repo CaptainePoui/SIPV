@@ -97,10 +97,34 @@ class RingGroup(Base):
     extension: Mapped[str] = mapped_column(String(20), nullable=False)  # The extension number to call this group
     ring_strategy: Mapped[str] = mapped_column(String(20), default="simultaneous")  # simultaneous, hunt
     ring_time: Mapped[int] = mapped_column(Integer, default=20)
+    # ⚠️ LEGACY (TASK-023.9) : source de verite avant cette tache. Remplace par la
+    # table ring_group_members (priorite/ordre/exclusion par poste) -- conserve tel
+    # quel pour compat/historique, plus lu par le dialplan (_ringgroup_dialplan_entries).
     members: Mapped[str] = mapped_column(Text, nullable=False)  # comma-separated extension usernames
     no_answer_destination: Mapped[str | None] = mapped_column(String(100))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    # --- TASK-023.9 ---
+    confirm_before_answer: Mapped[bool] = mapped_column(Boolean, default=False)
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("schedules.id", ondelete="SET NULL"))
+
+    ring_members: Mapped[list["RingGroupMember"]] = relationship("RingGroupMember", back_populates="ring_group", cascade="all, delete-orphan")
+
+
+class RingGroupMember(Base):
+    """Membre d'un groupe d'appel avec priorite/ordre/exclusion temporaire (TASK-023.9)."""
+    __tablename__ = "ring_group_members"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    ring_group_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ring_groups.id", ondelete="CASCADE"), nullable=False)
+    extension_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sip_extensions.id", ondelete="CASCADE"), nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, default=0)  # plus bas = priorite plus haute (meme convention que QueueMember.penalty)
+    ring_order: Mapped[int] = mapped_column(Integer, default=0)  # ordre de sonnerie pour la strategie "hunt" (sequentielle)
+    temporarily_excluded: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    ring_group: Mapped["RingGroup"] = relationship("RingGroup", back_populates="ring_members")
+    extension: Mapped["SIPExtension"] = relationship("SIPExtension")
 
 
 class ParkingLot(Base):

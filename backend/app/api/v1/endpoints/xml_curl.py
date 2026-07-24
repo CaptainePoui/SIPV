@@ -374,9 +374,9 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession, r
     )
     extensions = result.scalars().all()
 
-    # Ring groups
+    # Ring groups (ring_members eager-charge -- TASK-023.9)
     result = await db.execute(
-        select(RingGroup).where(
+        select(RingGroup).options(selectinload(RingGroup.ring_members)).where(
             RingGroup.tenant_id == tenant.id,
             RingGroup.is_active == True,
         )
@@ -395,7 +395,7 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession, r
     ctx = xe(requested_context or f"internal-{account}")
     domain = xe(account)
     ext_entries = _ext_dialplan_entries(extensions, domain, account, ctx, caller_ext)
-    rg_entries = _ringgroup_dialplan_entries(ring_groups, domain)
+    rg_entries = await _ringgroup_dialplan_entries(ring_groups, domain, extensions, db, ctx)
     gate_entries = await _call_permission_gate_entries(caller_ext, tenant, out_routes, account, db)
     outbound_entries = _outbound_dialplan_entries(out_routes, account, caller_ext)
 
@@ -504,20 +504,87 @@ def _ext_dialplan_entries(extensions: list, domain: str, account: str, ctx: str,
     return "\n\n".join(entries)
 
 
-def _ringgroup_dialplan_entries(ring_groups: list, domain: str) -> str:
+async def _is_schedule_open(schedule_id, db: AsyncSession) -> bool:
+    """
+    Meme logique que schedules.py::check_is_open() (pas refactore en commun pour ne
+    pas toucher un endpoint deja en prod pour cette tache -- petite duplication
+    assumee, voir TASK-023.9). Retourne True si pas de schedule (aucune restriction).
+    """
+    import zoneinfo
+    from app.models.schedule import Schedule, ScheduleRule, Holiday
+
+    sched = await db.get(Schedule, schedule_id)
+    if not sched or not sched.is_active:
+        return False if sched else True
+    try:
+        tz = zoneinfo.ZoneInfo(sched.timezone)
+    except Exception:
+        tz = zoneinfo.ZoneInfo("America/Montreal")
+    now_local = datetime.now(tz)
+    today = now_local.date()
+    now_time = now_local.time().replace(second=0, microsecond=0)
+    weekday = now_local.weekday()
+
+    holidays = await db.execute(select(Holiday).where(Holiday.tenant_id == sched.tenant_id))
+    for h in holidays.scalars().all():
+        match = (h.date.month == today.month and h.date.day == today.day) if h.recurring else (h.date == today)
+        if match:
+            return False
+
+    rules = await db.execute(select(ScheduleRule).where(ScheduleRule.schedule_id == schedule_id))
+    for r in rules.scalars().all():
+        days = [int(d) for d in r.days_of_week.split(",") if d]
+        if weekday in days and r.open_time <= now_time < r.close_time:
+            return True
+    return False
+
+
+async def _ringgroup_dialplan_entries(ring_groups: list, domain: str, extensions: list, db: AsyncSession, ctx: str) -> str:
+    ext_by_id = {e.id: e for e in extensions}
     entries = []
     for rg in ring_groups:
         name = xe(f"rg_{rg.extension}")
         num = xe(rg.extension)
-        members = [m.strip() for m in (rg.members or "").split(",") if m.strip()]
-        if not members:
+
+        # --- TASK-023.9 : horaire d'appartenance -- groupe ferme, ne sonne personne ---
+        if rg.schedule_id and not await _is_schedule_open(rg.schedule_id, db):
+            fallback = rg.no_answer_destination
+            if fallback:
+                entries.append(f"""      <!-- Ring group {rg.extension}: {xe(rg.name)} (ferme -- horaire) -->
+      <extension name="{name}">
+        <condition field="destination_number" expression="^{num}$">
+          <action application="transfer" data="{xe(fallback)} XML {ctx}"/>
+        </condition>
+      </extension>""")
             continue
+
+        # Priorite (RingGroupMember) sur la table structuree si elle a des membres,
+        # sinon repli sur l'ancien CSV `members` (compat -- CRUD table pas encore fait,
+        # voir TASK-023.9 reste a faire) -- comportement IDENTIQUE a avant pour tout
+        # groupe qui n'a pas encore ete migre vers la nouvelle table.
+        active_members = [rgm for rgm in (rg.ring_members or []) if not rgm.temporarily_excluded]
+        if active_members:
+            if rg.ring_strategy == "hunt":
+                active_members.sort(key=lambda m: (m.ring_order, m.priority))
+            else:
+                active_members.sort(key=lambda m: m.priority)
+            usernames = [ext_by_id[m.extension_id].username for m in active_members if m.extension_id in ext_by_id]
+        else:
+            usernames = [m.strip() for m in (rg.members or "").split(",") if m.strip()]
+
+        if not usernames:
+            continue
+
+        confirm_prefix = ""
+        if rg.confirm_before_answer:
+            confirm_prefix = "{group_confirm_key=1,group_confirm_file=ivr/ivr-call_being_transferred.wav}"
+
         if rg.ring_strategy == "simultaneous":
             # All at once: separate with :_:
-            bridge_str = ":_:".join(_bridge(m, domain) for m in members)
+            bridge_str = ":_:".join(f"{confirm_prefix}{_bridge(m, domain)}" for m in usernames)
         else:
             # Hunt: one at a time
-            bridge_str = ":".join(_bridge(m, domain) for m in members)
+            bridge_str = ":".join(f"{confirm_prefix}{_bridge(m, domain)}" for m in usernames)
         timeout = xe(str(rg.ring_time))
         entries.append(f"""      <!-- Ring group {rg.extension}: {xe(rg.name)} -->
       <extension name="{name}">

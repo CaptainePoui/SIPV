@@ -7,8 +7,9 @@ from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from app.core.database import get_db
 from app.api.v1.endpoints.auth import get_current_user
-from app.models.ivr import IVR, IVROption, Queue, QueueMember, RingGroup
+from app.models.ivr import IVR, IVROption, Queue, QueueMember, RingGroup, RingGroupMember
 from app.models.pending_change import PendingChange
+from app.models.sip import SIPExtension
 from app.models.user import User
 
 router = APIRouter()
@@ -265,6 +266,26 @@ async def remove_queue_member(member_id: uuid.UUID, db: AsyncSession = Depends(g
 
 # ── Ring Groups ───────────────────────────────────────────────────────────────
 
+class RingGroupMemberOut(BaseModel):
+    id: uuid.UUID
+    extension_id: uuid.UUID
+    extension_username: str
+    priority: int
+    ring_order: int
+    temporarily_excluded: bool
+
+class RingGroupMemberCreate(BaseModel):
+    extension_id: uuid.UUID
+    priority: int = 0
+    ring_order: int = 0
+    temporarily_excluded: bool = False
+
+class RingGroupMemberUpdate(BaseModel):
+    priority: int | None = None
+    ring_order: int | None = None
+    temporarily_excluded: bool | None = None
+
+
 class RingGroupOut(BaseModel):
     id: uuid.UUID
     tenant_id: uuid.UUID
@@ -272,10 +293,13 @@ class RingGroupOut(BaseModel):
     extension: str
     ring_strategy: str
     ring_time: int
-    members: list[str]
+    members: list[str]  # legacy CSV -- voir ring_members pour la donnee structuree (TASK-023.9)
     no_answer_destination: str | None
     is_active: bool
     created_at: datetime
+    confirm_before_answer: bool
+    schedule_id: uuid.UUID | None
+    ring_members: list[RingGroupMemberOut] = []
 
 class RingGroupCreate(BaseModel):
     name: str
@@ -284,6 +308,17 @@ class RingGroupCreate(BaseModel):
     ring_time: int = 20
     members: list[str]
     no_answer_destination: str | None = None
+    confirm_before_answer: bool = False
+    schedule_id: uuid.UUID | None = None
+
+class RingGroupUpdate(BaseModel):
+    name: str | None = None
+    ring_strategy: str | None = None
+    ring_time: int | None = None
+    no_answer_destination: str | None = None
+    is_active: bool | None = None
+    confirm_before_answer: bool | None = None
+    schedule_id: uuid.UUID | None = None
 
 
 def _rg_out(r: RingGroup) -> RingGroupOut:
@@ -292,26 +327,107 @@ def _rg_out(r: RingGroup) -> RingGroupOut:
         ring_strategy=r.ring_strategy, ring_time=r.ring_time,
         members=[m.strip() for m in r.members.split(",") if m.strip()],
         no_answer_destination=r.no_answer_destination, is_active=r.is_active, created_at=r.created_at,
+        confirm_before_answer=r.confirm_before_answer, schedule_id=r.schedule_id,
+        ring_members=[
+            RingGroupMemberOut(
+                id=m.id, extension_id=m.extension_id,
+                extension_username=m.extension.username if m.extension else "",
+                priority=m.priority, ring_order=m.ring_order, temporarily_excluded=m.temporarily_excluded,
+            ) for m in (r.ring_members or [])
+        ],
     )
 
 
 @router.get("/ring-groups/tenant/{tenant_id}", response_model=list[RingGroupOut])
 async def list_ring_groups(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
-    result = await db.execute(select(RingGroup).where(RingGroup.tenant_id == tenant_id).order_by(RingGroup.extension))
+    result = await db.execute(
+        select(RingGroup).options(selectinload(RingGroup.ring_members).selectinload(RingGroupMember.extension))
+        .where(RingGroup.tenant_id == tenant_id).order_by(RingGroup.extension)
+    )
     return [_rg_out(r) for r in result.scalars().all()]
+
+
+@router.put("/ring-groups/{rg_id}", response_model=RingGroupOut)
+async def update_ring_group(rg_id: uuid.UUID, payload: RingGroupUpdate, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    result = await db.execute(
+        select(RingGroup).options(selectinload(RingGroup.ring_members).selectinload(RingGroupMember.extension))
+        .where(RingGroup.id == rg_id)
+    )
+    rg = result.scalar_one_or_none()
+    if not rg:
+        raise HTTPException(status_code=404, detail="Groupe d'appels introuvable")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(rg, k, v)
+    db.add(PendingChange(tenant_id=rg.tenant_id, change_type="update_ring_group", entity_type="ring_group",
+                         entity_id=str(rg_id), payload=payload.model_dump(exclude_unset=True), created_by=user.email))
+    await db.commit()
+    return _rg_out(rg)
+
+
+@router.post("/ring-groups/{rg_id}/members", response_model=RingGroupMemberOut, status_code=status.HTTP_201_CREATED)
+async def add_ring_group_member(rg_id: uuid.UUID, payload: RingGroupMemberCreate, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    rg = await db.get(RingGroup, rg_id)
+    if not rg:
+        raise HTTPException(status_code=404, detail="Groupe d'appels introuvable")
+    ext = await db.get(SIPExtension, payload.extension_id)
+    if not ext:
+        raise HTTPException(status_code=404, detail="Poste introuvable")
+    m = RingGroupMember(ring_group_id=rg_id, **payload.model_dump())
+    db.add(m)
+    db.add(PendingChange(tenant_id=rg.tenant_id, change_type="add_ring_group_member", entity_type="ring_group",
+                         entity_id=str(rg_id), payload={"extension_username": ext.username}, created_by=user.email))
+    await db.commit()
+    await db.refresh(m)
+    return RingGroupMemberOut(id=m.id, extension_id=m.extension_id, extension_username=ext.username,
+                              priority=m.priority, ring_order=m.ring_order, temporarily_excluded=m.temporarily_excluded)
+
+
+@router.put("/ring-groups/members/{member_id}", response_model=RingGroupMemberOut)
+async def update_ring_group_member(member_id: uuid.UUID, payload: RingGroupMemberUpdate, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    result = await db.execute(select(RingGroupMember).where(RingGroupMember.id == member_id))
+    m = result.scalar_one_or_none()
+    if not m:
+        raise HTTPException(status_code=404, detail="Membre introuvable")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(m, k, v)
+    ext = await db.get(SIPExtension, m.extension_id)
+    rg = await db.get(RingGroup, m.ring_group_id)
+    db.add(PendingChange(tenant_id=rg.tenant_id, change_type="update_ring_group_member", entity_type="ring_group",
+                         entity_id=str(m.ring_group_id), payload=payload.model_dump(exclude_unset=True), created_by=user.email))
+    await db.commit()
+    await db.refresh(m)
+    return RingGroupMemberOut(id=m.id, extension_id=m.extension_id, extension_username=ext.username if ext else "",
+                              priority=m.priority, ring_order=m.ring_order, temporarily_excluded=m.temporarily_excluded)
+
+
+@router.delete("/ring-groups/members/{member_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_ring_group_member(member_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    result = await db.execute(select(RingGroupMember).where(RingGroupMember.id == member_id))
+    m = result.scalar_one_or_none()
+    if not m:
+        raise HTTPException(status_code=404, detail="Membre introuvable")
+    rg = await db.get(RingGroup, m.ring_group_id)
+    db.add(PendingChange(tenant_id=rg.tenant_id, change_type="remove_ring_group_member", entity_type="ring_group",
+                         entity_id=str(m.ring_group_id), payload={"member_id": str(member_id)}, created_by=user.email))
+    await db.delete(m)
+    await db.commit()
 
 
 @router.post("/ring-groups/tenant/{tenant_id}", response_model=RingGroupOut, status_code=status.HTTP_201_CREATED)
 async def create_ring_group(tenant_id: uuid.UUID, payload: RingGroupCreate, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     rg = RingGroup(tenant_id=tenant_id, name=payload.name, extension=payload.extension,
                    ring_strategy=payload.ring_strategy, ring_time=payload.ring_time,
-                   members=",".join(payload.members), no_answer_destination=payload.no_answer_destination)
+                   members=",".join(payload.members), no_answer_destination=payload.no_answer_destination,
+                   confirm_before_answer=payload.confirm_before_answer, schedule_id=payload.schedule_id)
     db.add(rg)
     db.add(PendingChange(tenant_id=tenant_id, change_type="add_ring_group", entity_type="ring_group",
                          entity_id=str(rg.id), payload={"extension": payload.extension, "members": payload.members}, created_by=user.email))
     await db.commit()
-    await db.refresh(rg)
-    return _rg_out(rg)
+    result = await db.execute(
+        select(RingGroup).options(selectinload(RingGroup.ring_members).selectinload(RingGroupMember.extension))
+        .where(RingGroup.id == rg.id)
+    )
+    return _rg_out(result.scalar_one())
 
 
 @router.delete("/ring-groups/{rg_id}", status_code=status.HTTP_204_NO_CONTENT)

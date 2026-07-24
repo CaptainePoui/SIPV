@@ -3,7 +3,7 @@ from app.models.tenant import Tenant
 from app.models.sip import SIPExtension, SIPTrunk, TenantDID
 from app.models.pending_change import PendingChange
 from app.models.dialplan import OutboundRoute, InboundRoute
-from app.models.ivr import IVR, IVROption, Queue, QueueMember, RingGroup, ParkingLot
+from app.models.ivr import IVR, IVROption, Queue, QueueMember, RingGroup, RingGroupMember, ParkingLot
 from app.models.voicemail import VoicemailBox, VoicemailMessage
 from app.models.cdr import CDR, RatePrefix
 from app.models.e911 import E911Address, DID911Assignment, ExtensionE911Assignment

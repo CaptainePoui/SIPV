@@ -1688,6 +1688,59 @@ renvoi/DND sur CompanyDetail.jsx et ContactDetail.jsx (ce dernier n'affichait AU
 statut live avant cette tâche).
 Fichiers : sipv/backend/app/api/v1/endpoints/esl.py.
 
+### TASK-S023.9 [~] Ring groups reconstruits (priorité/ordre/exclusion/confirmation/horaire)
+Demande de l'utilisateur : priorité du poste, ordre de sonnerie, confirmer avant de
+répondre, poste temporairement exclu, horaire d'appartenance au groupe -- `RingGroup`
+n'avait qu'un CSV `members` brut sans aucune de ces notions par membre.
+
+Fait (migration `0032_ring_group_members_s023_9`, avec migration de DONNÉES -- pas
+juste un schéma) :
+- Nouvelle table `ring_group_members` (extension_id FK, priority, ring_order,
+  temporarily_excluded). Le CSV `members` existant est parsé et migré automatiquement
+  vers cette table pendant la migration (ordre CSV -> ring_order), aucune donnée
+  perdue. `members` reste en DB comme LEGACY (règle "ne jamais supprimer une
+  colonne sans demande") mais n'est plus la source de vérité pour le dialplan --
+  seulement un repli si un groupe n'a aucun membre dans la nouvelle table (compat
+  pour un éventuel groupe créé par un ancien chemin de code pas encore mis à jour).
+- `RingGroup.confirm_before_answer`, `RingGroup.schedule_id` (FK schedules,
+  réutilise TASK-S016 -- pas de nouveau modèle d'horaire).
+- `xml_curl.py::_ringgroup_dialplan_entries()` réécrite : trie par `ring_order` puis
+  `priority` en mode "hunt" (séquentiel), exclut les membres `temporarily_excluded`,
+  vérifie l'horaire (`_is_schedule_open()`, dupliqué depuis `schedules.py` --
+  assumé plutôt que refactoré pour ne pas toucher un endpoint déjà en prod, voir
+  commentaire dans le code) et transfère vers `no_answer_destination` si le groupe
+  est fermé, préfixe chaque cible de bridge avec
+  `{group_confirm_key=1,group_confirm_file=...}` si `confirm_before_answer`.
+- `ivr.py` : nouveaux endpoints `PUT /ring-groups/{id}` (name/strategy/ring_time/
+  no_answer_destination/is_active/confirm_before_answer/schedule_id) et
+  `POST/PUT/DELETE /ring-groups/{id}/members` (miroir exact du pattern QueueMember
+  de TASK-S007.2).
+
+⚠️ Bug trouvé et corrigé EN TESTANT (pas laissé tel quel) : `create_ring_group`
+plantait en 500 (`MissingGreenlet`) -- appelait `_rg_out(rg)` sur un objet fraîchement
+créé sans `ring_members` eager-chargé (accès lazy hors contexte async). Fix : refetch
+avec `selectinload` après le commit (même pattern que `list_ring_groups`), et
+`update_ring_group` avait le même risque latent -- `db.refresh()` retiré (inutile,
+aucun champ à défaut serveur modifié) plutôt que risqué. Un ORPHELIN créé par la
+1ère tentative ratée (l'INSERT avait réussi avant le crash de sérialisation) a été
+retrouvé et nettoyé après coup.
+
+Testé en direct de bout en bout (groupe de test "150", 2 membres réels
+t1001-100/101) : ordre "hunt" respecté (101 ring_order=0 sonne avant 100
+ring_order=1, confirmé dans le XML dialplan généré) ; exclusion temporaire
+retire bien 101 du bridge (100 seul reste) ; `confirm_before_answer` ajoute
+bien le préfixe `group_confirm_key` sur la cible restante. Tout supprimé après
+coup (0 lignes `ring_groups`/`ring_group_members`). Les 3 postes de test TLS
+restent `Registered` sans interruption après les 2 redémarrages.
+
+⚠️ [~] et pas [x] : horaire (`schedule_id`) et `confirm_before_answer` testés
+seulement au niveau génération XML (pas avec un vrai appel qui atteint réellement
+`group_confirm_key` en pratique -- nécessiterait un softphone qui répond et appuie
+une touche, hors de portée des clients de test actuels).
+Fichiers : sipv/backend/app/models/ivr.py, models/__init__.py,
+api/v1/endpoints/xml_curl.py, api/v1/endpoints/ivr.py,
+alembic/versions/0032_ring_group_members_s023_9.py.
+
 ### TASK-S011.2 [x] Fiche physique du poste (ProvisionedPhone étendu)
 Dépend de : TASK-S011 (provisioning existant)
 Champs ajoutés sur `ProvisionedPhone` (migration `0021_phone_physical`, appliquée sur
