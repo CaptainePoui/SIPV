@@ -23,6 +23,7 @@ event_socket.conf.xml xml-curl pointing to:
   http://127.0.0.1:8020/api/v1/xml_curl
 """
 import html
+import json
 import re
 import uuid as uuid_mod
 from datetime import datetime, timezone
@@ -34,6 +35,7 @@ from sqlalchemy.orm import selectinload
 from app.core.database import get_db
 from app.core.crypto import decrypt
 from app.core.nanp import CANADIAN_AREA_CODES
+from app.core.esl import get_esl
 from app.models.tenant import Tenant
 from app.models.sip import SIPExtension, TenantDID
 from app.models.dialplan import InboundRoute, OutboundRoute
@@ -398,6 +400,7 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession, r
     rg_entries = await _ringgroup_dialplan_entries(ring_groups, domain, extensions, db, ctx)
     gate_entries = await _call_permission_gate_entries(caller_ext, tenant, out_routes, account, db)
     outbound_entries = _outbound_dialplan_entries(out_routes, account, caller_ext)
+    pickup_entries = await _pickup_dialplan_entries(caller_ext, extensions)
 
     xml = f"""{XML_HDR}
 <document type="freeswitch/xml">
@@ -420,6 +423,7 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession, r
         </condition>
       </extension>
 
+{pickup_entries}
 {ext_entries}
 {rg_entries}
 {gate_entries}
@@ -457,6 +461,47 @@ def _forward_action_xml(dest_type: str, dest_value: str | None, ext: "SIPExtensi
     if dest_type == "ring_group" and value:
         return f'<action application="execute_extension" data="{xe(f"rg_{value}")} XML {ctx}"/>'
     return None
+
+
+async def _pickup_dialplan_entries(caller_ext: "SIPExtension | None", extensions: list) -> str:
+    """
+    TASK-023.15 : prefixe d'interception *8 -- decroche l'appel en train de sonner
+    dans le meme groupe d'interception (pickup_group) que le poste appelant.
+    Resolu au moment de la generation XML (pas de cache xml_curl) : interroge ESL
+    pour trouver un canal RINGING dont le callee appartient au meme pickup_group,
+    puis emet <action application="intercept"> avec l'UUID reel de ce canal.
+    Aucune entree emise si le poste appelant n'a pas de pickup_group / n'a pas le
+    droit d'intercepter -- *8 tombe alors sur le catchall (486) comme avant.
+    """
+    if not caller_ext or not caller_ext.pickup_group or not caller_ext.can_intercept_calls:
+        return ""
+    group_usernames = {e.username for e in extensions if e.pickup_group == caller_ext.pickup_group}
+    if not group_usernames:
+        return ""
+    try:
+        esl = await get_esl()
+        raw = await esl.show_channels()
+        data = json.loads(raw)
+    except Exception:
+        return ""
+    target_uuid = None
+    for row in data.get("rows", []):
+        if (row.get("callstate") or "").upper() not in ("RINGING", "EARLY"):
+            continue
+        haystack = " ".join(str(row.get(f, "") or "") for f in (
+            "cid_num", "dest", "callee_num", "presence_id", "initial_dest",
+        ))
+        if any(u in haystack for u in group_usernames):
+            target_uuid = row.get("uuid")
+            break
+    if not target_uuid:
+        return ""
+    return f"""      <!-- Interception de groupe : *8 -->
+      <extension name="call_pickup">
+        <condition field="destination_number" expression="^\\*8$">
+          <action application="intercept" data="{xe(target_uuid)}"/>
+        </condition>
+      </extension>"""
 
 
 def _resolve_alert_info(ext: "SIPExtension", caller_number: str | None) -> str | None:

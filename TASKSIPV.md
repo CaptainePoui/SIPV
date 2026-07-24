@@ -1909,6 +1909,28 @@ postes de test restent `Registered`.
 Fichiers : sipv/backend/app/models/sip.py, api/v1/endpoints/sync.py,
 api/v1/endpoints/extensions.py, alembic/versions/0037_ext_identification.py.
 
+### TASK-023.15 [x] Préfixe d'interception *8 réellement câblé
+`pickup_group`/`can_intercept_calls` existaient (S007.2) mais aucun préfixe de code
+feature ne les utilisait -- juste des champs stockés, non actionnables.
+
+Fait : `_pickup_dialplan_entries()` -- résolu au moment de la génération XML (pas de
+cache xml_curl côté FreeSWITCH, chaque tentative de `*8` redéclenche un vrai lookup) :
+interroge ESL (`show channels as json`) pour trouver un canal `RINGING`/`EARLY` dont
+le callee appartient au MÊME `pickup_group` que le poste appelant, puis émet
+`<action application="intercept" data="{uuid réel}">`. Rien n'est émis si l'appelant
+n'a pas de `pickup_group` / n'a pas `can_intercept_calls` -- `*8` tombe alors sur le
+catchall (486) comme avant, aucune régression pour les postes qui n'ont pas cette
+fonctionnalité configurée.
+
+Testé en direct avec un VRAI appel (pas juste structurel) : `pickup_group="grpA"`
+posé sur t1001-100 ET t1001-101, appel de test qui fait sonner t1001-100
+(`originate ... &park`), puis simulation d'un lookup dialplan `*8` avec
+`variable_sip_from_user=t1001-101` (même groupe) -- l'action `intercept` générée
+contient exactement l'UUID réel du canal en train de sonner, confirmé en comparant
+avec `show channels as json` au même instant. Tout nettoyé après (pickup_group remis
+à `NULL`, appel raccroché). Les 3 postes de test restent `Registered`.
+Fichiers : sipv/backend/app/api/v1/endpoints/xml_curl.py.
+
 ### TASK-S008.2 [x] Voicemail — accueils audio, langue, politique globale/compagnie/poste
 Dépend de : TASK-S008, décision transverse (héritage de settings, résolue plus haut)
 
