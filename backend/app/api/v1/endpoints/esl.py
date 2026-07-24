@@ -35,6 +35,7 @@ class RegistrationOut(BaseModel):
     private_ip: str | None = None  # IP annoncee par le poste lui-meme dans son Contact SIP (souvent l'IP LAN)
     port: str | None = None
     registered_count: int = 0  # nombre d'appareils enregistres simultanement pour ce poste (TASK-S011.2)
+    call_state: str = "idle"  # idle | ringing | active (TASK-023.7 -- statut d'appel en direct)
 
 
 def _parse_registrations(raw: str) -> dict[str, list[dict]]:
@@ -63,6 +64,56 @@ def _parse_registrations(raw: str) -> dict[str, list[dict]]:
             "port": row.get("network_port"),
         })
     return result
+
+
+# Valeurs `callstate` documentees de FreeSWITCH (mod_commands, show channels) --
+# confirme en direct par un appel de test reel (2026-07-24) : "RINGING" observe sur
+# le canal pendant la sonnerie. ACTIVE/HELD (appel repondu) pas observes avec un vrai
+# appel dans cette session (aucun softphone de test ne repond automatiquement) --
+# valeurs standard documentees FreeSWITCH, pas devinees a l'aveugle.
+_RINGING_STATES = {"RINGING", "EARLY"}
+_ACTIVE_STATES = {"ACTIVE", "HELD"}
+
+
+def _parse_channel_states(raw: str) -> list[tuple[str, str]]:
+    """
+    Parse 'show channels as json' -> liste de (haystack, "ringing"|"active") pour
+    chaque canal en cours (TASK-023.7). Retourne une liste (pas un dict par username)
+    car le matching se fait par SOUS-CHAINE (meme approche pragmatique que
+    _active_call_uuid deja en place plus haut) -- les champs FreeSWITCH contiennent
+    souvent des suffixes (ex: "t1001-100-0x59ce73db8470" pour un softphone), un
+    match exact sur le seul username casserait la detection.
+    """
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    out: list[tuple[str, str]] = []
+    for row in data.get("rows", []):
+        callstate = (row.get("callstate") or "").upper()
+        if callstate in _RINGING_STATES:
+            state = "ringing"
+        elif callstate in _ACTIVE_STATES:
+            state = "active"
+        else:
+            continue
+        haystack = " ".join(str(row.get(f, "") or "") for f in (
+            "cid_num", "dest", "callee_num", "presence_id", "initial_dest",
+        ))
+        out.append((haystack, state))
+    return out
+
+
+def _lookup_call_state(channel_states: list[tuple[str, str]], username: str) -> str:
+    """"ringing" gagne sur "active" si le poste apparait sur plusieurs canaux a la
+    fois (le cas le plus visible/actionnable pour l'utilisateur)."""
+    found = "idle"
+    for haystack, state in channel_states:
+        if username in haystack:
+            if state == "ringing":
+                return "ringing"
+            found = "active"
+    return found
 
 
 # ── Status ────────────────────────────────────────────────────────────────────
@@ -130,10 +181,12 @@ async def tenant_registrations(
     try:
         esl: ESLClient = await get_esl()
         raw = await esl.show_registrations()
+        channels_raw = await esl.show_channels()
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"ESL error: {exc}")
 
     regs = _parse_registrations(raw)
+    channel_states = _parse_channel_states(channels_raw)
     out = []
     for ext in extensions:
         reg_list = regs.get(ext.username, [])
@@ -145,6 +198,7 @@ async def tenant_registrations(
             private_ip=reg["private_ip"] if reg else None,
             port=reg["port"] if reg else None,
             registered_count=len(reg_list),
+            call_state=_lookup_call_state(channel_states, ext.username),
         ))
     return out
 

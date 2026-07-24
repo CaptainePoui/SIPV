@@ -1657,6 +1657,37 @@ type sur ERPCRM (TASK-023.5/ContactDetail.jsx).
 Fichiers : sipv/backend/app/models/sip.py, api/v1/endpoints/xml_curl.py,
 api/v1/endpoints/extensions.py, alembic/versions/0031_forward_destination_types.py.
 
+### TASK-S023.7 [x] Statut d'appel en direct (en ligne / sonne) par poste
+Demande de l'utilisateur : voir sur la fiche compagnie ET contact si un poste est
+actuellement "en ligne" (icone combiné rouge) ou "sonne" (icone cloche jaune).
+
+Fait :
+- `esl.py::_parse_channel_states()` : parse `show channels as json`, classe chaque
+  canal `ringing` (callstate RINGING/EARLY) ou `active` (callstate ACTIVE/HELD).
+  Valeurs `callstate` confirmées par un VRAI appel de test (`originate ... &park`) --
+  `RINGING` observé en direct pendant la sonnerie ; `ACTIVE`/`HELD` sont les valeurs
+  documentées FreeSWITCH standard pour un appel répondu (pas observées avec un appel
+  répondu réel dans cette session -- aucun softphone de test n'auto-répond -- mais
+  ce sont des constantes du protocole `show channels`, pas devinées).
+- `_lookup_call_state()` : matching par SOUS-CHAINE (pas exact) sur plusieurs champs
+  (`cid_num`, `dest`, `callee_num`, `presence_id`, `initial_dest`) -- les champs
+  FreeSWITCH contiennent souvent un suffixe (ex: `t1001-100-0x59ce73db8470` pour un
+  softphone), un match exact aurait raté la détection (piège identifié en inspectant
+  la vraie sortie JSON avant d'écrire le matching).
+- `RegistrationOut.call_state` ajouté (idle/ringing/active), `tenant_registrations()`
+  fait maintenant 2 appels ESL (registrations + channels) au lieu d'un seul, toujours
+  un seul appel par TENANT (pas par poste) comme le reste de cet endpoint.
+
+Testé en direct : appel de test (`originate ... &park` sur t1001-100) → l'endpoint
+`GET /esl/registrations/tenant/{id}` retourne bien `call_state: "ringing"` pour
+t1001-100 SEULEMENT (101/102 restent `idle`, confirmant que le matching par
+sous-chaîne ne fait pas de faux positifs) ; après `hupall`, revient à `idle` pour
+tous. Les 3 postes de test restent `Registered` sans interruption.
+Reste à faire : côté ERPCRM (TASK-023.8) -- exposer `call_state` + statut
+renvoi/DND sur CompanyDetail.jsx et ContactDetail.jsx (ce dernier n'affichait AUCUN
+statut live avant cette tâche).
+Fichiers : sipv/backend/app/api/v1/endpoints/esl.py.
+
 ### TASK-S011.2 [x] Fiche physique du poste (ProvisionedPhone étendu)
 Dépend de : TASK-S011 (provisioning existant)
 Champs ajoutés sur `ProvisionedPhone` (migration `0021_phone_physical`, appliquée sur
