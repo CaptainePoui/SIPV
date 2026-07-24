@@ -22,6 +22,13 @@ class SIPExtension(Base):
     voicemail_email: Mapped[str | None] = mapped_column(String(255))
     caller_id_name: Mapped[str | None] = mapped_column(String(100))
     caller_id_number: Mapped[str | None] = mapped_column(String(30))
+    # --- TASK-018.6 : caller ID separe interne/externe (caller_id_name/number
+    # ci-dessus restent le fallback generique -- pas retires, compat ascendante) ---
+    caller_id_internal_name: Mapped[str | None] = mapped_column(String(100))
+    caller_id_internal_number: Mapped[str | None] = mapped_column(String(30))
+    caller_id_external_name: Mapped[str | None] = mapped_column(String(100))
+    caller_id_external_number: Mapped[str | None] = mapped_column(String(30))
+    hide_caller_id: Mapped[bool] = mapped_column(Boolean, default=False)  # s'applique aux appels externes seulement
     # Call recording
     record_calls: Mapped[bool] = mapped_column(Boolean, default=False)
     # Max channels

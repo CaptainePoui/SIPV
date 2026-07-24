@@ -38,6 +38,10 @@ class Tenant(Base):
     default_ld_pin: Mapped[str | None] = mapped_column(String(255))  # chiffre (Fernet)
     default_ld_monthly_limit: Mapped[float | None] = mapped_column(Numeric(10, 2))
 
+    # --- TASK-018.6 : caller ID externe par defaut de la compagnie ---
+    default_caller_id_name: Mapped[str | None] = mapped_column(String(100))
+    default_caller_id_number: Mapped[str | None] = mapped_column(String(30))
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 

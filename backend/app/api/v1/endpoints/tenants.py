@@ -38,6 +38,8 @@ class TenantOut(BaseModel):
     default_blocked_prefixes: str | None = None
     has_default_ld_pin: bool = False  # jamais le NIP en clair dans la liste/fiche compagnie
     default_ld_monthly_limit: float | None = None
+    default_caller_id_name: str | None = None
+    default_caller_id_number: str | None = None
 
 class TenantCreate(BaseModel):
     account_number: str
@@ -63,6 +65,8 @@ class TenantUpdate(BaseModel):
     default_blocked_prefixes: str | None = None
     default_ld_pin: str | None = None  # en clair a l'entree, chiffre avant stockage
     default_ld_monthly_limit: float | None = None
+    default_caller_id_name: str | None = None
+    default_caller_id_number: str | None = None
 
 
 def _tenant_out(t: Tenant) -> TenantOut:
@@ -79,6 +83,7 @@ def _tenant_out(t: Tenant) -> TenantOut:
         default_allow_international=t.default_allow_international, default_allow_premium=t.default_allow_premium,
         default_blocked_countries=t.default_blocked_countries, default_blocked_prefixes=t.default_blocked_prefixes,
         has_default_ld_pin=bool(t.default_ld_pin), default_ld_monthly_limit=float(t.default_ld_monthly_limit) if t.default_ld_monthly_limit is not None else None,
+        default_caller_id_name=t.default_caller_id_name, default_caller_id_number=t.default_caller_id_number,
     )
 
 

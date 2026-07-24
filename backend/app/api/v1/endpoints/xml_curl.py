@@ -183,9 +183,16 @@ _TOLL_ALLOW_MAP = {
 }
 
 
-def _user_xml(ext: "SIPExtension", domain: str) -> str:
-    cid_name = xe(ext.caller_id_name or ext.name)
-    cid_num = xe(ext.caller_id_number or ext.extension)
+def _user_xml(ext: "SIPExtension", tenant: "Tenant") -> str:
+    # --- TASK-018.6 : caller ID separe interne/externe. `caller_id_name/number`
+    # (generique) reste le fallback intermediaire pour compat ascendante -- les
+    # extensions crees avant cette tache continuent de fonctionner identiquement
+    # tant que les nouveaux champs specifiques ne sont pas remplis.
+    int_name = xe(ext.caller_id_internal_name or ext.caller_id_name or ext.name)
+    int_num = xe(ext.caller_id_internal_number or ext.caller_id_number or ext.extension)
+    ext_name = xe(ext.caller_id_external_name or ext.caller_id_name or tenant.default_caller_id_name or ext.name)
+    ext_num = xe(ext.caller_id_external_number or ext.caller_id_number or tenant.default_caller_id_number or ext.extension)
+    domain = tenant.account_number
     context = xe(_context_name(domain))
     vm = "true" if ext.voicemail_enabled else "false"
     codec_var = ""
@@ -193,16 +200,21 @@ def _user_xml(ext: "SIPExtension", domain: str) -> str:
     if fs_codecs:
         codec_var = f'\n                <variable name="absolute_codec_string" value="{",".join(fs_codecs)}"/>'
     toll_allow = _TOLL_ALLOW_MAP.get(ext.call_permission, _TOLL_ALLOW_MAP["international"])
+    # Masquer le caller ID -- applique seulement au sortant externe (outbound_*),
+    # jamais au interne (effective_*) : un collegue doit toujours voir qui appelle.
+    privacy_var = ""
+    if ext.hide_caller_id:
+        privacy_var = '\n                <variable name="origination_privacy" value="hide_name:hide_number:screen"/>'
     return f"""            <user id="{xe(ext.username)}">
               <params>
                 <param name="password" value="{xe(decrypt(ext.password))}"/>
               </params>
               <variables>
                 <variable name="user_context" value="{context}"/>
-                <variable name="effective_caller_id_name" value="{cid_name}"/>
-                <variable name="effective_caller_id_number" value="{cid_num}"/>
-                <variable name="outbound_caller_id_name" value="{cid_name}"/>
-                <variable name="outbound_caller_id_number" value="{cid_num}"/>
+                <variable name="effective_caller_id_name" value="{int_name}"/>
+                <variable name="effective_caller_id_number" value="{int_num}"/>
+                <variable name="outbound_caller_id_name" value="{ext_name}"/>
+                <variable name="outbound_caller_id_number" value="{ext_num}"/>{privacy_var}
                 <variable name="voicemail_enabled" value="{vm}"/>
                 <variable name="accountcode" value="{xe(ext.username)}"/>
                 <variable name="toll_allow" value="{toll_allow}"/>{codec_var}
@@ -233,7 +245,7 @@ def _directory_single_user(tenant: "Tenant", ext: "SIPExtension", advertised_dom
       <groups>
         <group name="default">
           <users>
-{_user_xml(ext, tenant.account_number)}
+{_user_xml(ext, tenant)}
           </users>
         </group>
       </groups>
@@ -248,7 +260,7 @@ def _directory_full_domain(tenant: "Tenant", extensions: list) -> str:
         "{presence_id=${dialed_user}@${dialed_domain}}"
         "${sofia_contact(*/${dialed_user}@${dialed_domain})}"
     )
-    users_xml = "\n".join(_user_xml(ext, tenant.account_number) for ext in extensions)
+    users_xml = "\n".join(_user_xml(ext, tenant) for ext in extensions)
     return f"""{XML_HDR}
 <document type="freeswitch/xml">
   <section name="directory">

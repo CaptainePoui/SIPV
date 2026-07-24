@@ -99,6 +99,12 @@ class ExtOut(BaseModel):
     has_ld_pin: bool = False  # jamais le NIP en clair dans la fiche
     ld_monthly_limit: float | None
     preferred_trunk_id: uuid.UUID | None
+    # --- TASK-018.6 : caller ID interne/externe ---
+    caller_id_internal_name: str | None
+    caller_id_internal_number: str | None
+    caller_id_external_name: str | None
+    caller_id_external_number: str | None
+    hide_caller_id: bool
 
 class ExtCreate(BaseModel):
     extension: str
@@ -147,6 +153,11 @@ class ExtCreate(BaseModel):
     ld_pin: str | None = None  # en clair a l'entree, chiffre avant stockage
     ld_monthly_limit: float | None = None
     preferred_trunk_id: uuid.UUID | None = None
+    caller_id_internal_name: str | None = None
+    caller_id_internal_number: str | None = None
+    caller_id_external_name: str | None = None
+    caller_id_external_number: str | None = None
+    hide_caller_id: bool = False
 
 class ExtUpdate(BaseModel):
     name: str | None = None
@@ -195,6 +206,11 @@ class ExtUpdate(BaseModel):
     ld_pin: str | None = None  # en clair a l'entree, chiffre avant stockage ; "" = retirer le NIP
     ld_monthly_limit: float | None = None
     preferred_trunk_id: uuid.UUID | None = None
+    caller_id_internal_name: str | None = None
+    caller_id_internal_number: str | None = None
+    caller_id_external_name: str | None = None
+    caller_id_external_number: str | None = None
+    hide_caller_id: bool | None = None
 
 
 def _out(e: SIPExtension, groups: list[str] | None = None) -> ExtOut:
@@ -223,6 +239,9 @@ def _out(e: SIPExtension, groups: list[str] | None = None) -> ExtOut:
         allow_premium=e.allow_premium, blocked_countries=e.blocked_countries, blocked_prefixes=e.blocked_prefixes,
         has_ld_pin=bool(e.ld_pin), ld_monthly_limit=float(e.ld_monthly_limit) if e.ld_monthly_limit is not None else None,
         preferred_trunk_id=e.preferred_trunk_id,
+        caller_id_internal_name=e.caller_id_internal_name, caller_id_internal_number=e.caller_id_internal_number,
+        caller_id_external_name=e.caller_id_external_name, caller_id_external_number=e.caller_id_external_number,
+        hide_caller_id=e.hide_caller_id,
     )
 
 
@@ -294,6 +313,11 @@ def _snapshot(e: SIPExtension) -> dict:
         "has_ld_pin": bool(e.ld_pin),
         "ld_monthly_limit": float(e.ld_monthly_limit) if e.ld_monthly_limit is not None else None,
         "preferred_trunk_id": str(e.preferred_trunk_id) if e.preferred_trunk_id else None,
+        "caller_id_internal_name": e.caller_id_internal_name,
+        "caller_id_internal_number": e.caller_id_internal_number,
+        "caller_id_external_name": e.caller_id_external_name,
+        "caller_id_external_number": e.caller_id_external_number,
+        "hide_caller_id": e.hide_caller_id,
     }
 
 

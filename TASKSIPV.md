@@ -1575,6 +1575,43 @@ Fichiers : sipv/backend/app/core/nanp.py (nouveau), models/sip.py, models/tenant
 api/v1/endpoints/xml_curl.py, api/v1/endpoints/extensions.py,
 api/v1/endpoints/tenants.py, alembic/versions/0029_call_permission_s018_5.py.
 
+### TASK-S018.6 [x] Caller ID separe interne/externe + masquer + defaut compagnie
+Demande de l'utilisateur (meme "mega prompt" que S018.5) : `caller_id_name`/
+`caller_id_number` (S003) etaient un SEUL couple utilise a la fois pour
+`effective_caller_id_*` (interne) et `outbound_caller_id_*` (externe) -- impossible
+d'afficher un nom/numero different a un collegue interne vs a l'exterieur.
+
+Fait (migration `0030_caller_id_split_s018_6`) :
+- `SIPExtension.caller_id_internal_name/number`, `caller_id_external_name/number`
+  (tous nullable), `hide_caller_id` (bool). Les anciens `caller_id_name/number`
+  restent en DB et servent de fallback intermediaire (compat ascendante totale --
+  une extension existante qui n'a que les anciens champs remplis continue de se
+  comporter EXACTEMENT comme avant).
+- `Tenant.default_caller_id_name/number` : defaut compagnie pour l'EXTERNE
+  seulement (ex: numero principal de la compagnie) -- l'interne n'a pas de defaut
+  compagnie, il retombe directement sur le nom/poste du contact.
+- Chaine de resolution dans `_user_xml()` (xml_curl.py, qui prend maintenant
+  `tenant` en parametre au lieu de juste le nom de domaine) :
+  - interne : `caller_id_internal_name/number` -> `caller_id_name/number` -> `ext.name`/`ext.extension`
+  - externe : `caller_id_external_name/number` -> `caller_id_name/number` -> `tenant.default_caller_id_name/number` -> `ext.name`/`ext.extension`
+- `hide_caller_id` : emet `origination_privacy=hide_name:hide_number:screen`
+  UNIQUEMENT sur le sortant (aucune variable ajoutee sur `effective_*`) -- un
+  collegue interne doit toujours voir qui appelle, seul le monde exterieur ne doit
+  pas voir le numero si l'utilisateur l'a demande.
+- `extensions.py`/`tenants.py` : nouveaux champs exposes sur `ExtOut`/`ExtCreate`/
+  `ExtUpdate`/`TenantOut`/`TenantUpdate`.
+
+Deploye et teste en direct : migration 0030 appliquee, sipv-backend + sipv-backend-tls
+redemarres, les 3 postes de test restent `Registered`. Test de bascule reel en DB sur
+t1001-100 : `caller_id_external_name/number` + `hide_caller_id=true` poses ->
+XML directory regenere confirme `effective_caller_id_name=Test Un` (interne
+inchange) MAIS `outbound_caller_id_name=Simple IP inc.` (externe different) +
+`origination_privacy` present ; tout remis a NULL/false apres verification.
+Reste a faire : exposer cote ERPCRM (fiche contact) -- TASK-023.5, voir TASKERPCRM.md.
+Fichiers : sipv/backend/app/models/sip.py, models/tenant.py,
+api/v1/endpoints/xml_curl.py, api/v1/endpoints/extensions.py,
+api/v1/endpoints/tenants.py, alembic/versions/0030_caller_id_split_s018_6.py.
+
 ### TASK-S011.2 [x] Fiche physique du poste (ProvisionedPhone étendu)
 Dépend de : TASK-S011 (provisioning existant)
 Champs ajoutés sur `ProvisionedPhone` (migration `0021_phone_physical`, appliquée sur
