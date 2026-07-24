@@ -146,3 +146,41 @@ class ParkingLot(Base):
     timeout_seconds: Mapped[int] = mapped_column(Integer, default=120)
     return_extension: Mapped[str | None] = mapped_column(String(20))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class PagingGroup(Base):
+    """
+    Groupe de paging (TASK-023.23) — distinct du ring group : diffusion (broadcast)
+    d'un poste vers plusieurs, pas une sonnerie normale d'appel entrant. multicast_
+    address/port = donnees pour le provisioning telephone (P-codes, TASK-S011.4) --
+    le vrai paging multicast se fait telephone-a-telephone sur le LAN, FreeSWITCH
+    n'est pas dans le chemin media pour ca. Le declenchement SIP (composer
+    l'extension du groupe) utilise `page`/`bridge` selon le mode -- voir xml_curl.py.
+    """
+    __tablename__ = "paging_groups"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    extension: Mapped[str] = mapped_column(String(20), nullable=False)  # numero pour declencher le paging
+    mode: Mapped[str] = mapped_column(String(20), default="unidirectional", server_default="unidirectional")  # unidirectional, bidirectional
+    multicast_address: Mapped[str | None] = mapped_column(String(45))
+    multicast_port: Mapped[int | None] = mapped_column(Integer)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    paging_members: Mapped[list["PagingGroupMember"]] = relationship("PagingGroupMember", back_populates="paging_group", cascade="all, delete-orphan")
+
+
+class PagingGroupMember(Base):
+    """Membre d'un groupe de paging -- peut emettre et/ou recevoir (TASK-023.23)."""
+    __tablename__ = "paging_group_members"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    paging_group_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("paging_groups.id", ondelete="CASCADE"), nullable=False)
+    extension_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sip_extensions.id", ondelete="CASCADE"), nullable=False)
+    can_send: Mapped[bool] = mapped_column(Boolean, default=True)
+    can_receive: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    paging_group: Mapped["PagingGroup"] = relationship("PagingGroup", back_populates="paging_members")
+    extension: Mapped["SIPExtension"] = relationship("SIPExtension")

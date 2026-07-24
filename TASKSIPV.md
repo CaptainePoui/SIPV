@@ -1879,6 +1879,45 @@ Testé en direct : `GET /ivr/ring-groups/tenant/{id}` appelé avec `X-Api-Key` s
 test restent `Registered`.
 Fichiers : sipv/backend/app/api/v1/endpoints/ivr.py.
 
+### TASK-023.23 [~] Paging groups (bidirectionnel/unidirectionnel, multicast)
+Demande de l'utilisateur : 3e section séparée (ring group ✓, pickup ✓, paging) --
+"dans grandstream ucm on peut faire des page bidirectionnelle et unidirectionnelle,
+j'aimerais ça l'avoir aussi".
+
+Fait (migration `0040_paging_groups`) : nouveau modèle `PagingGroup` (extension pour
+déclencher, `mode` unidirectional/bidirectional, `multicast_address`/`multicast_port`)
++ `PagingGroupMember` (extension_id, `can_send`, `can_receive`). CRUD complet
+(`/ivr/paging-groups/...`, miroir exact du pattern RingGroup).
+
+Câblage dialplan (`_paging_dialplan_entries()`) : diffusion simultanée
+(`bridge` avec `:_:`) vers tous les membres `can_receive`, préfixée du même
+`{sip_h_Call-Info=<sip:intercom>;answer-after=0}` déjà validé pour l'intercom
+(S023.11) -- auto-answer sur chaque récepteur.
+
+⚠️ Vérifié AVANT de coder plutôt que deviné : `page` (application FreeSWITCH dédiée
+au paging one-way) N'EST PAS disponible sur ce build (`show application` -- 0
+résultat pour `page`, `bridge` confirmé présent) -- donc PAS utilisée, `bridge`
+employé à la place pour les deux modes.
+⚠️ [~] : `mode="unidirectional"` ne coupe PAS réellement l'audio du récepteur vers
+l'émetteur dans cette implémentation -- aucun mécanisme fiable trouvé/vérifié pour
+ça avec les outils disponibles sur ce build. Les deux modes se comportent donc
+identiquement côté FreeSWITCH pour l'instant (diffusion auto-répondue) ; documenté
+honnêtement plutôt que de prétendre un one-way qui ne l'est pas réellement.
+`multicast_address`/`multicast_port` sont des données de PROVISIONING téléphone
+(P-codes, TASK-S011.4 pas commencée) -- le vrai paging multicast Grandstream se
+fait téléphone-à-téléphone sur le LAN, hors du chemin média de FreeSWITCH ; stockées
+pour cet usage futur, pas encore consommées.
+
+Testé en direct : groupe de test créé (extension 160, mode unidirectional, adresse
+multicast de test), membre ajouté (poste réel t1001-101, can_receive seulement) --
+XML dialplan généré vérifié (`{sip_h_Call-Info=...}user/t1001-101@t1001` présent au
+bon endroit). Cycle CRUD complet testé (create/update mode/delete membre/delete
+groupe). SIPV confirmé propre après (0 lignes dans les deux tables), les 3 postes
+de test restent `Registered`.
+Fichiers : sipv/backend/app/models/ivr.py, models/__init__.py,
+api/v1/endpoints/xml_curl.py, api/v1/endpoints/ivr.py,
+alembic/versions/0040_paging_groups.py.
+
 ### TASK-S011.4 [ ] Auto-provisioning Grandstream (fichier cfg<MAC>.xml, zero-touch)
 Demande de l'utilisateur (2026-07-24) : configuration réseau automatique du téléphone
 au lieu de la configuration manuelle qu'on vient de faire à la main pour le GXP2135 —

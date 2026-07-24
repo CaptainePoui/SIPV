@@ -39,7 +39,7 @@ from app.core.esl import get_esl
 from app.models.tenant import Tenant
 from app.models.sip import SIPExtension, TenantDID
 from app.models.dialplan import InboundRoute, OutboundRoute
-from app.models.ivr import IVR, IVROption, RingGroup
+from app.models.ivr import IVR, IVROption, RingGroup, PagingGroup, PagingGroupMember
 from app.models.cdr import CDR
 
 router = APIRouter()
@@ -385,6 +385,15 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession, r
     )
     ring_groups = result.scalars().all()
 
+    # Paging groups (TASK-023.23)
+    result = await db.execute(
+        select(PagingGroup).options(selectinload(PagingGroup.paging_members).selectinload(PagingGroupMember.extension)).where(
+            PagingGroup.tenant_id == tenant.id,
+            PagingGroup.is_active == True,
+        )
+    )
+    paging_groups = result.scalars().all()
+
     # Outbound routes (ordered by priority)
     result = await db.execute(
         select(OutboundRoute).where(
@@ -398,6 +407,7 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession, r
     domain = xe(account)
     ext_entries = _ext_dialplan_entries(extensions, domain, account, ctx, caller_ext)
     rg_entries = await _ringgroup_dialplan_entries(ring_groups, domain, extensions, db, ctx)
+    paging_entries = _paging_dialplan_entries(paging_groups, domain)
     gate_entries = await _call_permission_gate_entries(caller_ext, tenant, out_routes, account, db)
     outbound_entries = _outbound_dialplan_entries(out_routes, account, caller_ext)
     pickup_entries = await _pickup_dialplan_entries(caller_ext, extensions)
@@ -426,6 +436,7 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession, r
 {pickup_entries}
 {ext_entries}
 {rg_entries}
+{paging_entries}
 {gate_entries}
 {outbound_entries}
 
@@ -680,6 +691,43 @@ async def _ringgroup_dialplan_entries(ring_groups: list, domain: str, extensions
           <action application="set" data="call_timeout={timeout}"/>
           <action application="set" data="ringback=${{us-ring}}"/>
           <action application="bridge" data="{xe(bridge_str)}"/>
+        </condition>
+      </extension>""")
+    return "\n\n".join(entries)
+
+
+def _paging_dialplan_entries(paging_groups: list, domain: str) -> str:
+    """
+    TASK-023.23 : diffusion (broadcast) vers un groupe de paging -- distinct d'un
+    ring group (pas une sonnerie d'appel entrant normale). Cable via `bridge`
+    simultane + auto-answer Call-Info (meme technique validee que l'intercom
+    S023.11) vers tous les membres `can_receive` -- `page` (app FreeSWITCH dediee
+    au paging one-way) N'EST PAS disponible sur ce build (verifie : absent de
+    `show application`), donc pas utilisee.
+    ⚠️ mode="unidirectional" ne coupe PAS reellement l'audio du recepteur vers
+    l'emetteur dans cette implementation -- aucun mecanisme fiable trouve/verifie
+    pour ca dans ce projet (documente honnetement plutot que suppose). Les deux
+    modes se comportent donc pour l'instant comme un appel diffuse auto-repondu ;
+    seul `multicast_address`/`multicast_port` (donnees de provisioning telephone,
+    TASK-S011.4) distinguera un jour vraiment le comportement one-way reel, qui se
+    passe telephone-a-telephone sur le LAN, hors du chemin media de FreeSWITCH.
+    """
+    entries = []
+    for pg in paging_groups:
+        receivers = [m for m in (pg.paging_members or []) if m.can_receive and m.extension]
+        if not receivers:
+            continue
+        name = xe(f"pg_{pg.extension}")
+        num = xe(pg.extension)
+        targets = ":_:".join(
+            f"{{sip_h_Call-Info=<sip:intercom>;answer-after=0}}{_bridge(m.extension.username, domain)}"
+            for m in receivers
+        )
+        entries.append(f"""      <!-- Paging group {pg.extension}: {xe(pg.name)} ({xe(pg.mode)}) -->
+      <extension name="{name}">
+        <condition field="destination_number" expression="^{num}$">
+          <action application="set" data="ringback=${{us-ring}}"/>
+          <action application="bridge" data="{targets}"/>
         </condition>
       </extension>""")
     return "\n\n".join(entries)

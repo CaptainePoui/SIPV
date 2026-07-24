@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from app.core.database import get_db
 from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
-from app.models.ivr import IVR, IVROption, Queue, QueueMember, RingGroup, RingGroupMember
+from app.models.ivr import IVR, IVROption, Queue, QueueMember, RingGroup, RingGroupMember, PagingGroup, PagingGroupMember
 from app.models.pending_change import PendingChange
 from app.models.sip import SIPExtension
 from app.models.user import User
@@ -446,4 +446,167 @@ async def delete_ring_group(rg_id: uuid.UUID, db: AsyncSession = Depends(get_db)
     db.add(PendingChange(tenant_id=rg.tenant_id, change_type="remove_ring_group", entity_type="ring_group",
                          entity_id=str(rg_id), payload={"name": rg.name}, created_by=user.email if user else "erpcrm-proxy"))
     await db.delete(rg)
+    await db.commit()
+
+
+# ── Paging Groups (TASK-023.23) ─────────────────────────────────────────────────
+
+class PagingGroupMemberOut(BaseModel):
+    id: uuid.UUID
+    extension_id: uuid.UUID
+    extension_username: str
+    can_send: bool
+    can_receive: bool
+
+class PagingGroupMemberCreate(BaseModel):
+    extension_id: uuid.UUID
+    can_send: bool = True
+    can_receive: bool = True
+
+class PagingGroupMemberUpdate(BaseModel):
+    can_send: bool | None = None
+    can_receive: bool | None = None
+
+
+class PagingGroupOut(BaseModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    name: str
+    extension: str
+    mode: str
+    multicast_address: str | None
+    multicast_port: int | None
+    is_active: bool
+    created_at: datetime
+    paging_members: list[PagingGroupMemberOut] = []
+
+class PagingGroupCreate(BaseModel):
+    name: str
+    extension: str
+    mode: str = "unidirectional"
+    multicast_address: str | None = None
+    multicast_port: int | None = None
+
+class PagingGroupUpdate(BaseModel):
+    name: str | None = None
+    extension: str | None = None
+    mode: str | None = None
+    multicast_address: str | None = None
+    multicast_port: int | None = None
+    is_active: bool | None = None
+
+
+def _pg_out(pg: PagingGroup) -> PagingGroupOut:
+    return PagingGroupOut(
+        id=pg.id, tenant_id=pg.tenant_id, name=pg.name, extension=pg.extension, mode=pg.mode,
+        multicast_address=pg.multicast_address, multicast_port=pg.multicast_port,
+        is_active=pg.is_active, created_at=pg.created_at,
+        paging_members=[
+            PagingGroupMemberOut(
+                id=m.id, extension_id=m.extension_id,
+                extension_username=m.extension.username if m.extension else "",
+                can_send=m.can_send, can_receive=m.can_receive,
+            ) for m in (pg.paging_members or [])
+        ],
+    )
+
+
+@router.get("/paging-groups/tenant/{tenant_id}", response_model=list[PagingGroupOut])
+async def list_paging_groups(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    result = await db.execute(
+        select(PagingGroup).options(selectinload(PagingGroup.paging_members).selectinload(PagingGroupMember.extension))
+        .where(PagingGroup.tenant_id == tenant_id).order_by(PagingGroup.extension)
+    )
+    return [_pg_out(pg) for pg in result.scalars().all()]
+
+
+@router.post("/paging-groups/tenant/{tenant_id}", response_model=PagingGroupOut, status_code=status.HTTP_201_CREATED)
+async def create_paging_group(tenant_id: uuid.UUID, payload: PagingGroupCreate, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
+    pg = PagingGroup(tenant_id=tenant_id, **payload.model_dump())
+    db.add(pg)
+    db.add(PendingChange(tenant_id=tenant_id, change_type="add_paging_group", entity_type="paging_group",
+                         entity_id=str(pg.id), payload={"extension": payload.extension}, created_by=user.email if user else "erpcrm-proxy"))
+    await db.commit()
+    result = await db.execute(
+        select(PagingGroup).options(selectinload(PagingGroup.paging_members).selectinload(PagingGroupMember.extension))
+        .where(PagingGroup.id == pg.id)
+    )
+    return _pg_out(result.scalar_one())
+
+
+@router.put("/paging-groups/{pg_id}", response_model=PagingGroupOut)
+async def update_paging_group(pg_id: uuid.UUID, payload: PagingGroupUpdate, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
+    result = await db.execute(
+        select(PagingGroup).options(selectinload(PagingGroup.paging_members).selectinload(PagingGroupMember.extension))
+        .where(PagingGroup.id == pg_id)
+    )
+    pg = result.scalar_one_or_none()
+    if not pg:
+        raise HTTPException(status_code=404, detail="Groupe de paging introuvable")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(pg, k, v)
+    db.add(PendingChange(tenant_id=pg.tenant_id, change_type="update_paging_group", entity_type="paging_group",
+                         entity_id=str(pg_id), payload=payload.model_dump(exclude_unset=True), created_by=user.email if user else "erpcrm-proxy"))
+    await db.commit()
+    return _pg_out(pg)
+
+
+@router.delete("/paging-groups/{pg_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_paging_group(pg_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
+    result = await db.execute(select(PagingGroup).where(PagingGroup.id == pg_id))
+    pg = result.scalar_one_or_none()
+    if not pg:
+        raise HTTPException(status_code=404, detail="Groupe de paging introuvable")
+    db.add(PendingChange(tenant_id=pg.tenant_id, change_type="remove_paging_group", entity_type="paging_group",
+                         entity_id=str(pg_id), payload={"name": pg.name}, created_by=user.email if user else "erpcrm-proxy"))
+    await db.delete(pg)
+    await db.commit()
+
+
+@router.post("/paging-groups/{pg_id}/members", response_model=PagingGroupMemberOut, status_code=status.HTTP_201_CREATED)
+async def add_paging_group_member(pg_id: uuid.UUID, payload: PagingGroupMemberCreate, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
+    pg = await db.get(PagingGroup, pg_id)
+    if not pg:
+        raise HTTPException(status_code=404, detail="Groupe de paging introuvable")
+    ext = await db.get(SIPExtension, payload.extension_id)
+    if not ext:
+        raise HTTPException(status_code=404, detail="Poste introuvable")
+    m = PagingGroupMember(paging_group_id=pg_id, **payload.model_dump())
+    db.add(m)
+    db.add(PendingChange(tenant_id=pg.tenant_id, change_type="add_paging_group_member", entity_type="paging_group",
+                         entity_id=str(pg_id), payload={"extension_username": ext.username}, created_by=user.email if user else "erpcrm-proxy"))
+    await db.commit()
+    await db.refresh(m)
+    return PagingGroupMemberOut(id=m.id, extension_id=m.extension_id, extension_username=ext.username,
+                                can_send=m.can_send, can_receive=m.can_receive)
+
+
+@router.put("/paging-groups/members/{member_id}", response_model=PagingGroupMemberOut)
+async def update_paging_group_member(member_id: uuid.UUID, payload: PagingGroupMemberUpdate, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
+    result = await db.execute(select(PagingGroupMember).where(PagingGroupMember.id == member_id))
+    m = result.scalar_one_or_none()
+    if not m:
+        raise HTTPException(status_code=404, detail="Membre introuvable")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(m, k, v)
+    ext = await db.get(SIPExtension, m.extension_id)
+    pg = await db.get(PagingGroup, m.paging_group_id)
+    db.add(PendingChange(tenant_id=pg.tenant_id, change_type="update_paging_group_member", entity_type="paging_group",
+                         entity_id=str(m.paging_group_id), payload=payload.model_dump(exclude_unset=True), created_by=user.email if user else "erpcrm-proxy"))
+    await db.commit()
+    await db.refresh(m)
+    return PagingGroupMemberOut(id=m.id, extension_id=m.extension_id, extension_username=ext.username if ext else "",
+                                can_send=m.can_send, can_receive=m.can_receive)
+
+
+@router.delete("/paging-groups/members/{member_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_paging_group_member(member_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
+    result = await db.execute(select(PagingGroupMember).where(PagingGroupMember.id == member_id))
+    m = result.scalar_one_or_none()
+    if not m:
+        raise HTTPException(status_code=404, detail="Membre introuvable")
+    pg = await db.get(PagingGroup, m.paging_group_id)
+    db.add(PendingChange(tenant_id=pg.tenant_id, change_type="remove_paging_group_member", entity_type="paging_group",
+                         entity_id=str(m.paging_group_id), payload={"member_id": str(member_id)}, created_by=user.email if user else "erpcrm-proxy"))
+    await db.delete(m)
     await db.commit()
