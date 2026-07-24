@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.config import settings
 from app.api.v1.endpoints.auth import get_current_user
-from app.models.provisioning import PhoneModel, ProvisionedPhone
+from app.models.provisioning import PhoneModel, ProvisionedPhone, PhoneButton
 from app.models.sip import SIPExtension
 from app.models.user import User
 
@@ -308,3 +308,95 @@ async def get_phone_config_by_mac(mac_address: str, db: AsyncSession = Depends(g
         raise HTTPException(status_code=404, detail="MAC non enregistrée")
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url=f"/api/v1/provisioning/{phone.id}/config")
+
+
+# ── Boutons/touches programmables (TASK-023.17) ────────────────────────────────
+# Editeur en LISTE -- decouple de TASK-S011.3 (mapping visuel sur photo, bloque
+# faute de photo). Memes donnees, accessibles sans attendre une image cliquable.
+
+class PhoneButtonOut(BaseModel):
+    id: uuid.UUID
+    provisioned_phone_id: uuid.UUID
+    position: int
+    page: int
+    button_type: str
+    label: str | None
+    value: str | None
+    destination: str | None
+    sip_account_index: int
+    client_editable: bool
+    locked_by_simpleip: bool
+
+class PhoneButtonCreate(BaseModel):
+    position: int
+    page: int = 0
+    button_type: str
+    label: str | None = None
+    value: str | None = None
+    destination: str | None = None
+    sip_account_index: int = 1
+    client_editable: bool = False
+    locked_by_simpleip: bool = True
+
+class PhoneButtonUpdate(BaseModel):
+    position: int | None = None
+    page: int | None = None
+    button_type: str | None = None
+    label: str | None = None
+    value: str | None = None
+    destination: str | None = None
+    sip_account_index: int | None = None
+    client_editable: bool | None = None
+    locked_by_simpleip: bool | None = None
+
+
+def _button_out(b: PhoneButton) -> PhoneButtonOut:
+    return PhoneButtonOut(
+        id=b.id, provisioned_phone_id=b.provisioned_phone_id, position=b.position, page=b.page,
+        button_type=b.button_type, label=b.label, value=b.value, destination=b.destination,
+        sip_account_index=b.sip_account_index, client_editable=b.client_editable,
+        locked_by_simpleip=b.locked_by_simpleip,
+    )
+
+
+@router.get("/{phone_id}/buttons", response_model=list[PhoneButtonOut])
+async def list_phone_buttons(phone_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    result = await db.execute(
+        select(PhoneButton).where(PhoneButton.provisioned_phone_id == phone_id).order_by(PhoneButton.page, PhoneButton.position)
+    )
+    return [_button_out(b) for b in result.scalars().all()]
+
+
+@router.post("/{phone_id}/buttons", response_model=PhoneButtonOut, status_code=status.HTTP_201_CREATED)
+async def create_phone_button(phone_id: uuid.UUID, payload: PhoneButtonCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    phone = await db.get(ProvisionedPhone, phone_id)
+    if not phone:
+        raise HTTPException(status_code=404, detail="Téléphone introuvable")
+    b = PhoneButton(provisioned_phone_id=phone_id, **payload.model_dump())
+    db.add(b)
+    await db.commit()
+    await db.refresh(b)
+    return _button_out(b)
+
+
+@router.put("/buttons/{button_id}", response_model=PhoneButtonOut)
+async def update_phone_button(button_id: uuid.UUID, payload: PhoneButtonUpdate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    result = await db.execute(select(PhoneButton).where(PhoneButton.id == button_id))
+    b = result.scalar_one_or_none()
+    if not b:
+        raise HTTPException(status_code=404, detail="Bouton introuvable")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(b, k, v)
+    await db.commit()
+    await db.refresh(b)
+    return _button_out(b)
+
+
+@router.delete("/buttons/{button_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_phone_button(button_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    result = await db.execute(select(PhoneButton).where(PhoneButton.id == button_id))
+    b = result.scalar_one_or_none()
+    if not b:
+        raise HTTPException(status_code=404, detail="Bouton introuvable")
+    await db.delete(b)
+    await db.commit()

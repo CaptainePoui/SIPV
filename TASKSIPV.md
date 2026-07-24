@@ -1803,6 +1803,32 @@ deux (le modèle définit les zones cliquables, l'appareil stocke les valeurs as
 Fichiers cibles : nouveau modèle SQLAlchemy (ex. phone_button.py), nouvel endpoint,
 nouvelle page/composant frontend.
 
+### TASK-023.17 [x] Boutons/touches programmables — éditeur en LISTE (découplé de la photo)
+Demande de l'utilisateur : ne pas attendre la photo du GXP2135 (S011.3 bloquée) pour
+pouvoir gérer les boutons programmables — un éditeur en liste (pas visuel) couvre le
+même besoin de données dès maintenant.
+
+Fait (migration `0038_phone_buttons`) : nouvelle table `phone_buttons` rattachée à
+`ProvisionedPhone` (pas à `PhoneModel` — les valeurs assignées sont par APPAREIL
+physique, cohérent avec la décision déjà prise dans S011.2 "la config reste attachée
+au poste logique/à l'appareil, pas dupliquée"). Champs : `position`, `page`,
+`button_type` (ligne/BLF/composition rapide/parc/récupération de parc/messagerie/
+transfert/intercom/paging/DND/renvoi/file/connexion-déconnexion-pause agent/pickup
+group/code de fonction/porte/répertoire), `label`, `value`, `destination`,
+`sip_account_index` (quel compte SIP du téléphone), `client_editable`,
+`locked_by_simpleip`. CRUD complet : `GET/POST /provisioning/{phone_id}/buttons`,
+`PUT/DELETE /provisioning/buttons/{button_id}`.
+
+Testé en direct : téléphone de test créé, bouton BLF créé (poste 100), listé,
+modifié (type + client_editable), supprimé ; téléphone de test supprimé ensuite —
+suppression en cascade des boutons confirmée (0 lignes `phone_buttons` après). Les 3
+postes de test restent `Registered`.
+Reste (hors scope ici, c'est explicitement S011.3) : l'image cliquable elle-même
+attend toujours la photo. Cette table est réutilisable telle quelle par S011.3 quand
+la photo arrivera (mêmes colonnes, juste une UI différente par-dessus).
+Fichiers : sipv/backend/app/models/provisioning.py, models/__init__.py,
+api/v1/endpoints/provisioning.py, alembic/versions/0038_phone_buttons.py.
+
 ### TASK-S011.4 [ ] Auto-provisioning Grandstream (fichier cfg<MAC>.xml, zero-touch)
 Demande de l'utilisateur (2026-07-24) : configuration réseau automatique du téléphone
 au lieu de la configuration manuelle qu'on vient de faire à la main pour le GXP2135 —
