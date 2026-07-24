@@ -1829,6 +1829,30 @@ la photo arrivera (mêmes colonnes, juste une UI différente par-dessus).
 Fichiers : sipv/backend/app/models/provisioning.py, models/__init__.py,
 api/v1/endpoints/provisioning.py, alembic/versions/0038_phone_buttons.py.
 
+### TASK-023.18 [x] Catalogue PhoneModel Grandstream (65 modèles)
+Demande de l'utilisateur : "on peut commencer avec la game de grandstream, les
+modèles que tu vois dans le fichier config" -- référence P-code déjà déposée dans
+`/home/simpleip/GrandStream/Template_Config_Pcode/config-template/`.
+
+Fait (migration `0039_seed_grandstream`, idempotente -- guard sur `brand=
+'Grandstream'`) : 65 fichiers `.txt` parsés, dédupliqués par famille (garde la
+version firmware la plus récente par famille, ex. `gxp2130_40_60_70_35_config_
+1.0.11.106.txt` → un seul modèle `"GXP2130/40/60/70/35"`, pas éclaté en 5 lignes --
+suit le regroupement déjà fait par le fabricant dans le nom du fichier plutôt que
+de deviner les SKU exacts). `device_type` classé par préfixe de famille connu
+(GXP/GRP/GHP/GAC/GVC/DP7xx/WP8xx = téléphone ; HT5xx/7xx/8xx/GXW4xxx = ATA ;
+GDS37xx/GSC35xx/GXV33xx/GXV3500 = intercom/porte ; GS Wave = softphone). Fichiers
+non pertinents exclus (`gxp_config` générique trop ancien, `surveilliance_general`
+= caméra pas un téléphone, artefacts `new`/`2.txt`).
+
+Testé en direct : 65 modèles créés via l'API (pas d'insertion SQL directe pour le
+seed initial -- passé par `POST /provisioning/models` comme un usage normal),
+vérifié via `GET /provisioning/models` (65 lignes actives). Migration ensuite
+appliquée sur la même DB pour vérifier l'idempotence : guard a correctement empêché
+toute duplication (comptage inchangé, hors 1 modèle de test résiduel désactivé de
+TASK-023.13). Les 3 postes de test restent `Registered`.
+Fichiers : sipv/backend/alembic/versions/0039_seed_grandstream.py.
+
 ### TASK-S011.4 [ ] Auto-provisioning Grandstream (fichier cfg<MAC>.xml, zero-touch)
 Demande de l'utilisateur (2026-07-24) : configuration réseau automatique du téléphone
 au lieu de la configuration manuelle qu'on vient de faire à la main pour le GXP2135 —
