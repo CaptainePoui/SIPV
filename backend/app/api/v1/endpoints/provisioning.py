@@ -13,7 +13,7 @@ from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.config import settings
-from app.api.v1.endpoints.auth import get_current_user
+from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
 from app.models.provisioning import PhoneModel, ProvisionedPhone, PhoneButton
 from app.models.sip import SIPExtension
 from app.models.user import User
@@ -78,7 +78,7 @@ def _model_out(m: PhoneModel) -> PhoneModelOut:
 
 
 @router.get("/models", response_model=list[PhoneModelOut])
-async def list_models(db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def list_models(db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(PhoneModel).where(PhoneModel.is_active == True).order_by(PhoneModel.brand, PhoneModel.model))
     return [_model_out(m) for m in result.scalars().all()]
 
@@ -189,13 +189,25 @@ def _phone_out(p: ProvisionedPhone, reveal: bool = False) -> PhoneOut:
 
 
 @router.get("/tenant/{tenant_id}", response_model=list[PhoneOut])
-async def list_phones(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def list_phones(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(ProvisionedPhone).where(ProvisionedPhone.tenant_id == tenant_id).order_by(ProvisionedPhone.mac_address))
     return [_phone_out(p) for p in result.scalars().all()]
 
 
+@router.get("/by-extension/{extension_id}", response_model=PhoneOut | None)
+async def get_phone_by_extension(extension_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    """
+    Téléphone physique attribué à ce poste (TASK-023.19) -- appelé par ERPCRM (proxy)
+    pour afficher/gérer l'appareil depuis la fiche contact. Retourne null si aucun
+    appareil n'est encore attribué (pas une erreur).
+    """
+    result = await db.execute(select(ProvisionedPhone).where(ProvisionedPhone.extension_id == extension_id))
+    phone = result.scalar_one_or_none()
+    return _phone_out(phone) if phone else None
+
+
 @router.post("/tenant/{tenant_id}", response_model=PhoneOut, status_code=status.HTTP_201_CREATED)
-async def create_phone(tenant_id: uuid.UUID, payload: PhoneCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def create_phone(tenant_id: uuid.UUID, payload: PhoneCreate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     mac = payload.mac_address.upper().replace('-', ':')
     existing = await db.execute(select(ProvisionedPhone).where(ProvisionedPhone.mac_address == mac))
     if existing.scalar_one_or_none():
@@ -213,7 +225,7 @@ async def create_phone(tenant_id: uuid.UUID, payload: PhoneCreate, db: AsyncSess
 
 
 @router.put("/{phone_id}", response_model=PhoneOut)
-async def update_phone(phone_id: uuid.UUID, payload: PhoneUpdate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def update_phone(phone_id: uuid.UUID, payload: PhoneUpdate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(ProvisionedPhone).where(ProvisionedPhone.id == phone_id))
     p = result.scalar_one_or_none()
     if not p:
@@ -360,7 +372,7 @@ def _button_out(b: PhoneButton) -> PhoneButtonOut:
 
 
 @router.get("/{phone_id}/buttons", response_model=list[PhoneButtonOut])
-async def list_phone_buttons(phone_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def list_phone_buttons(phone_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(
         select(PhoneButton).where(PhoneButton.provisioned_phone_id == phone_id).order_by(PhoneButton.page, PhoneButton.position)
     )
@@ -368,7 +380,7 @@ async def list_phone_buttons(phone_id: uuid.UUID, db: AsyncSession = Depends(get
 
 
 @router.post("/{phone_id}/buttons", response_model=PhoneButtonOut, status_code=status.HTTP_201_CREATED)
-async def create_phone_button(phone_id: uuid.UUID, payload: PhoneButtonCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def create_phone_button(phone_id: uuid.UUID, payload: PhoneButtonCreate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     phone = await db.get(ProvisionedPhone, phone_id)
     if not phone:
         raise HTTPException(status_code=404, detail="Téléphone introuvable")
@@ -380,7 +392,7 @@ async def create_phone_button(phone_id: uuid.UUID, payload: PhoneButtonCreate, d
 
 
 @router.put("/buttons/{button_id}", response_model=PhoneButtonOut)
-async def update_phone_button(button_id: uuid.UUID, payload: PhoneButtonUpdate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def update_phone_button(button_id: uuid.UUID, payload: PhoneButtonUpdate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(PhoneButton).where(PhoneButton.id == button_id))
     b = result.scalar_one_or_none()
     if not b:
@@ -393,7 +405,7 @@ async def update_phone_button(button_id: uuid.UUID, payload: PhoneButtonUpdate, 
 
 
 @router.delete("/buttons/{button_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_phone_button(button_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def delete_phone_button(button_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(PhoneButton).where(PhoneButton.id == button_id))
     b = result.scalar_one_or_none()
     if not b:

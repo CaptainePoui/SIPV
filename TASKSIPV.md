@@ -1853,6 +1853,22 @@ toute duplication (comptage inchangé, hors 1 modèle de test résiduel désacti
 TASK-023.13). Les 3 postes de test restent `Registered`.
 Fichiers : sipv/backend/alembic/versions/0039_seed_grandstream.py.
 
+### TASK-023.19 [~] Accès proxy ERPCRM pour modèles/appareils/boutons
+Préparation nécessaire côté SIPV avant l'UI ERPCRM (fiche contact -- attribution
+appareil + éditeur de boutons) : les endpoints `/provisioning/models` (liste),
+`/provisioning/tenant/{id}` (liste/création téléphone), `/provisioning/{id}` (PUT),
+et les 4 endpoints boutons n'acceptaient QUE `get_current_user` (JWT humain) --
+ERPCRM (proxy serveur-à-serveur, clé API) ne pouvait pas les appeler. Basculés vers
+`get_current_user_or_service` (même pattern que extensions.py). Nouvel endpoint
+`GET /provisioning/by-extension/{extension_id}` (retourne le téléphone attribué à
+ce poste, ou `null` si aucun -- pas une erreur) pour que la fiche contact ERPCRM
+puisse retrouver l'appareil sans connaître son ID directement.
+
+Testé en direct : `GET /provisioning/by-extension/{id}` appelé avec `X-Api-Key`
+(pas de JWT) sur un poste sans appareil attribué -- `null` retourné correctement,
+pas de 401/403. Les 3 postes de test restent `Registered`.
+Fichiers : sipv/backend/app/api/v1/endpoints/provisioning.py.
+
 ### TASK-S011.4 [ ] Auto-provisioning Grandstream (fichier cfg<MAC>.xml, zero-touch)
 Demande de l'utilisateur (2026-07-24) : configuration réseau automatique du téléphone
 au lieu de la configuration manuelle qu'on vient de faire à la main pour le GXP2135 —
