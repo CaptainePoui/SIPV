@@ -14,6 +14,8 @@ class PhoneModel(Base):
     brand: Mapped[str] = mapped_column(String(40), nullable=False)   # Grandstream, Yealink, Polycom
     model: Mapped[str] = mapped_column(String(60), nullable=False)   # GXP2160, T46U
     firmware_version: Mapped[str | None] = mapped_column(String(30))
+    # TASK-023.13 -- telephone/ATA/softphone/intercom
+    device_type: Mapped[str] = mapped_column(String(20), default="telephone", server_default="telephone")
     max_accounts: Mapped[int] = mapped_column(default=1)
     provisioning_protocol: Mapped[str] = mapped_column(String(20), default="http")  # http, https, tftp
     config_template: Mapped[str | None] = mapped_column(Text)        # Jinja2 template text

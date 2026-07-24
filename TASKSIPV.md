@@ -1872,6 +1872,15 @@ dossier malgré la mention de l'utilisateur — la seule photo disponible reste
 À consulter directement dans ces fichiers au moment d'implémenter plutôt que de
 deviner un nom de P-code — volumineux, pas dupliqué ici.
 
+### TASK-023.13 [x] PhoneModel.device_type (téléphone/ATA/softphone/intercom)
+Champ manquant confirmé en lisant le modèle (migration `0036_phone_device_type`,
+défaut `"telephone"`). Testé en direct : modèle de test créé avec `device_type=
+"ata"`, relu correctement, désactivé après coup (`is_active=false` -- pas de DELETE
+sur `/provisioning/models`, seulement GET/POST/PUT, comportement pré-existant non
+touché ici). Les 3 postes de test restent `Registered`.
+Fichiers : sipv/backend/app/models/provisioning.py, api/v1/endpoints/provisioning.py,
+alembic/versions/0036_phone_device_type.py.
+
 ### TASK-S008.2 [x] Voicemail — accueils audio, langue, politique globale/compagnie/poste
 Dépend de : TASK-S008, décision transverse (héritage de settings, résolue plus haut)
 

@@ -43,6 +43,7 @@ class PhoneModelOut(BaseModel):
     brand: str
     model: str
     firmware_version: str | None
+    device_type: str
     max_accounts: int
     provisioning_protocol: str
     config_template: str | None
@@ -53,6 +54,7 @@ class PhoneModelCreate(BaseModel):
     brand: str
     model: str
     firmware_version: str | None = None
+    device_type: str = "telephone"  # telephone, ata, softphone, intercom
     max_accounts: int = 1
     provisioning_protocol: str = "http"
     config_template: str | None = None
@@ -60,6 +62,7 @@ class PhoneModelCreate(BaseModel):
 
 class PhoneModelUpdate(BaseModel):
     firmware_version: str | None = None
+    device_type: str | None = None
     max_accounts: int | None = None
     provisioning_protocol: str | None = None
     config_template: str | None = None
@@ -69,6 +72,7 @@ class PhoneModelUpdate(BaseModel):
 
 def _model_out(m: PhoneModel) -> PhoneModelOut:
     return PhoneModelOut(id=m.id, brand=m.brand, model=m.model, firmware_version=m.firmware_version,
+                         device_type=m.device_type,
                          max_accounts=m.max_accounts, provisioning_protocol=m.provisioning_protocol,
                          config_template=m.config_template, notes=m.notes, is_active=m.is_active)
 
