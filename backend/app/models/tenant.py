@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Boolean, DateTime, Text, Integer
+from sqlalchemy import String, Boolean, DateTime, Text, Integer, Numeric
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
@@ -22,6 +22,22 @@ class Tenant(Base):
     max_extensions: Mapped[int] = mapped_column(Integer, default=10)
     max_trunks: Mapped[int] = mapped_column(Integer, default=2)
     notes: Mapped[str | None] = mapped_column(Text)
+    # Override compagnie du reglage voicemail global (TASK-S008.2) -- null = herite du
+    # niveau global (TelephonySettings). Meme nom de champ que sur VoicemailBox et
+    # TelephonySettings pour que resolve_setting() fonctionne par simple getattr.
+    voicemail_delete_after_email: Mapped[bool | None] = mapped_column(Boolean)
+
+    # --- TASK-S018.5 : defauts compagnie du plan d'appel (base de la chaine
+    # d'heritage -- SIPExtension.allow_* herite d'ici quand null) ---
+    default_allow_canada: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    default_allow_us: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    default_allow_international: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    default_allow_premium: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    default_blocked_countries: Mapped[str | None] = mapped_column(String(255))
+    default_blocked_prefixes: Mapped[str | None] = mapped_column(String(255))
+    default_ld_pin: Mapped[str | None] = mapped_column(String(255))  # chiffre (Fernet)
+    default_ld_monthly_limit: Mapped[float | None] = mapped_column(Numeric(10, 2))
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 

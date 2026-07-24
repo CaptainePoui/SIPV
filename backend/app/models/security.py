@@ -23,11 +23,15 @@ class SecurityEvent(Base):
 
 
 class ACLRule(Base):
-    """IP-based ACL rules — allow or deny CIDR blocks per tenant or globally."""
+    """IP-based ACL rules — allow or deny CIDR blocks per poste, tenant, ou globalement."""
     __tablename__ = "acl_rules"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"))
+    # Regle scopee a un poste specifique (TASK-S014.2) -- null = regle compagnie/globale.
+    # Un poste peut avoir tenant_id ET extension_id tous les deux remplis (redondant
+    # mais pratique pour filtrer par compagnie sans jointure).
+    extension_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("sip_extensions.id", ondelete="CASCADE"))
     cidr: Mapped[str] = mapped_column(String(50), nullable=False)         # e.g. 192.168.1.0/24
     action: Mapped[str] = mapped_column(String(5), nullable=False)        # allow / deny
     description: Mapped[str | None] = mapped_column(String(200))
@@ -49,6 +53,13 @@ class FraudRule(Base):
     block_premium: Mapped[bool] = mapped_column(Boolean, default=True)   # 1-900 / 976 / etc.
     alert_email: Mapped[str | None] = mapped_column(String(255))
     auto_block_on_alert: Mapped[bool] = mapped_column(Boolean, default=False)
+    # TASK-S014.2 -- seuil de tentatives d'authentification SIP echouees avant blocage.
+    # ⚠️ Champ stocke, PAS ENCORE APPLIQUE : aucun watcher ne compte les echecs
+    # d'authentification SIP en temps reel actuellement (verifie -- security.py est un
+    # CRUD manuel, rien n'alimente SecurityEvent/BlockedIP automatiquement). Necessite
+    # un futur worker qui suit les evenements d'auth FreeSWITCH (ESL ou logs), pas fait
+    # ici -- pas invente pour eviter une fausse impression de protection active.
+    max_failed_auth_attempts: Mapped[int | None] = mapped_column(Integer, default=5)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

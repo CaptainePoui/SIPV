@@ -6,7 +6,7 @@ from app.models.dialplan import OutboundRoute, InboundRoute
 from app.models.ivr import IVR, IVROption, Queue, QueueMember, RingGroup, ParkingLot
 from app.models.voicemail import VoicemailBox, VoicemailMessage
 from app.models.cdr import CDR, RatePrefix
-from app.models.e911 import E911Address, DID911Assignment
+from app.models.e911 import E911Address, DID911Assignment, ExtensionE911Assignment
 from app.models.provisioning import PhoneModel, ProvisionedPhone
 from app.models.recording import RecordingPolicy, CallRecording
 from app.models.fax import FaxLine, FaxJob
@@ -15,3 +15,4 @@ from app.models.security import SecurityEvent, ACLRule, FraudRule, BlockedIP
 from app.models.webhook import WebhookEndpoint, WebhookDelivery
 from app.models.schedule import Schedule, ScheduleRule, Holiday
 from app.models.audit_log import AuditLog
+from app.models.settings import TelephonySettings

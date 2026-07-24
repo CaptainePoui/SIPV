@@ -39,5 +39,16 @@ class ProvisionedPhone(Base):
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     extra_config: Mapped[dict | None] = mapped_column(JSON)          # override key-value pairs
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # --- TASK-S011.2 : fiche physique du poste ---
+    serial_number: Mapped[str | None] = mapped_column(String(60))
+    hardware_version: Mapped[str | None] = mapped_column(String(30))
+    # Mot de passe admin du telephone, chiffre (Fernet, meme pattern que ClientAccess
+    # cote ERPCRM) -- jamais stocke en clair.
+    encrypted_admin_password: Mapped[str | None] = mapped_column(Text)
+    wifi_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    bluetooth_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    headset_used: Mapped[bool] = mapped_column(Boolean, default=False)
+    expansion_module: Mapped[str | None] = mapped_column(String(60))  # modele du module, null = aucun
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

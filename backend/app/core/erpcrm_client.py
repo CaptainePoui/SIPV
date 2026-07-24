@@ -9,14 +9,23 @@ from app.core.config import settings
 
 logger = logging.getLogger("erpcrm_client")
 
+# CA privee ERPCRM<->SIPV (TASK-039 TLS inter-serveurs) -- verifie le certificat du
+# port TLS dedie d'ERPCRM (8011), distinct du port HTTP existant (8010, inchange,
+# reste utilise par le frontend).
+_CA_PATH = "/home/sipv/sipv/backend/certs/ca.pem"
+
 
 def _headers() -> dict:
     return {"X-Api-Key": settings.SIPV_API_KEY}
 
 
+def _client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=5.0, verify=_CA_PATH)
+
+
 async def search_contact(name: str) -> dict | None:
     """Cherche un contact ERPCRM par nom. Retourne le premier resultat ou None."""
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with _client() as client:
         resp = await client.get(
             f"{settings.ERPCRM_API_URL}/api/v1/contacts",
             params={"search": name},
@@ -29,7 +38,7 @@ async def search_contact(name: str) -> dict | None:
 
 async def create_contact(first_name: str, last_name: str, extension: str) -> dict:
     """Cree un contact ERPCRM avec sipv_sync=true. Retourne le contact cree."""
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with _client() as client:
         resp = await client.post(
             f"{settings.ERPCRM_API_URL}/api/v1/contacts",
             json={
@@ -46,7 +55,7 @@ async def create_contact(first_name: str, last_name: str, extension: str) -> dic
 
 async def update_contact(contact_id: str, **fields) -> dict:
     """Met a jour un contact ERPCRM (sipv_sync, extension, etc.)."""
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with _client() as client:
         resp = await client.put(
             f"{settings.ERPCRM_API_URL}/api/v1/contacts/{contact_id}",
             json=fields,

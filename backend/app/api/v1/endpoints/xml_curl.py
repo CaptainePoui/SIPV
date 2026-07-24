@@ -23,17 +23,22 @@ event_socket.conf.xml xml-curl pointing to:
   http://127.0.0.1:8020/api/v1/xml_curl
 """
 import html
+import re
 import uuid as uuid_mod
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
+from app.core.crypto import decrypt
+from app.core.nanp import CANADIAN_AREA_CODES
 from app.models.tenant import Tenant
 from app.models.sip import SIPExtension, TenantDID
 from app.models.dialplan import InboundRoute, OutboundRoute
 from app.models.ivr import IVR, IVROption, RingGroup
+from app.models.cdr import CDR
 
 router = APIRouter()
 
@@ -70,6 +75,17 @@ def _bridge(username: str, domain: str) -> str:
     return f"user/{xe(username)}@{xe(domain)}"
 
 
+# Nommage convenu avec l'utilisateur (TASK-023.4, 2026-07-24) : appelant-appele-date-heure.
+_RECORDINGS_DIR = "/usr/local/freeswitch/recordings"
+
+
+def _record_action(enabled: bool) -> str:
+    if not enabled:
+        return ""
+    path = f"{_RECORDINGS_DIR}/${{caller_id_number}}-${{destination_number}}-${{strftime(%Y%m%d-%H%M%S)}}.wav"
+    return f'\n          <action application="record_session" data="{path}"/>'
+
+
 # ── Main router ────────────────────────────────────────────────────────────────
 
 @router.post("")
@@ -103,26 +119,36 @@ async def _handle_directory(form, db: AsyncSession) -> Response:
     # suffixe (ex: "t1001-100@") — on ne garde que la partie avant le "@".
     username = form.get("user", "").split("@")[0]
 
-    # Lookup tenant by account_number (= domain)
-    result = await db.execute(
-        select(Tenant).where(Tenant.account_number == domain, Tenant.is_active == True)
-    )
-    tenant = result.scalar_one_or_none()
-    if not tenant:
-        return _resp(NOT_FOUND)
+    # Lookup tenant by account_number (= domain), si le domaine envoye en matche un.
+    tenant = None
+    if domain:
+        result = await db.execute(
+            select(Tenant).where(Tenant.account_number == domain, Tenant.is_active == True)
+        )
+        tenant = result.scalar_one_or_none()
 
     # Lookup specific user if provided
     if username:
-        result = await db.execute(
-            select(SIPExtension).where(
-                SIPExtension.username == username,
-                SIPExtension.tenant_id == tenant.id,
-                SIPExtension.is_active == True,
-            )
+        ext_query = select(SIPExtension).where(
+            SIPExtension.username == username,
+            SIPExtension.is_active == True,
         )
+        if tenant:
+            ext_query = ext_query.where(SIPExtension.tenant_id == tenant.id)
+        result = await db.execute(ext_query)
         ext = result.scalar_one_or_none()
         if not ext:
             return _resp(NOT_FOUND)
+        if not tenant:
+            # Connexion "conventionnelle" : le client a mis l'adresse du serveur (ou
+            # n'importe quoi d'autre) comme domaine, pas le tenant -- le username SIP
+            # est deja globalement unique (contrainte a la creation), donc on retrouve
+            # le tenant via son VRAI lien (tenant_id, cle etrangere), pas via le domaine
+            # envoye. Demande explicite de l'utilisateur (2026-07-24) : le tenant est
+            # une "boite" liee au poste par relation, jamais par convention de nommage.
+            tenant = await db.get(Tenant, ext.tenant_id)
+            if not tenant or not tenant.is_active:
+                return _resp(NOT_FOUND)
         # Force le transport configure pour ce poste — uniquement verifie au REGISTER
         # (sip_via_protocol absent lors des lookups internes type "user/xxx@domain" pour
         # le bridge d'appel, qu'on ne veut pas bloquer).
@@ -130,7 +156,10 @@ async def _handle_directory(form, db: AsyncSession) -> Response:
             via_protocol = (form.get("sip_via_protocol") or "").lower()
             if via_protocol and via_protocol != ext.transport:
                 return _resp(NOT_FOUND)
-        return _resp(_directory_single_user(tenant, ext))
+        return _resp(_directory_single_user(tenant, ext, advertised_domain=domain))
+
+    if not tenant:
+        return _resp(NOT_FOUND)
 
     # No specific user → return full domain with all extensions
     result = await db.execute(
@@ -144,6 +173,14 @@ async def _handle_directory(form, db: AsyncSession) -> Response:
 
 
 _CODEC_MAP = {"ulaw": "PCMU", "alaw": "PCMA", "g722": "G722", "g729": "G729"}
+# ⚠️ toll_allow reflete call_permission mais n'est PAS applique par le dialplan --
+# OutboundRoute (xml_curl.py _handle_dialplan) n'a aucune verification de palier
+# d'appel. Decoratif tant que ce n'est pas cable explicitement (TASK-S018.3).
+_TOLL_ALLOW_MAP = {
+    "local": "local",
+    "national": "domestic,local",
+    "international": "domestic,international,local",
+}
 
 
 def _user_xml(ext: "SIPExtension", domain: str) -> str:
@@ -152,12 +189,13 @@ def _user_xml(ext: "SIPExtension", domain: str) -> str:
     context = xe(_context_name(domain))
     vm = "true" if ext.voicemail_enabled else "false"
     codec_var = ""
-    fs_codec = _CODEC_MAP.get(ext.codec)
-    if fs_codec:
-        codec_var = f'\n                <variable name="absolute_codec_string" value="{fs_codec}"/>'
+    fs_codecs = [_CODEC_MAP[c] for c in (ext.codec_list or "").split(",") if c in _CODEC_MAP]
+    if fs_codecs:
+        codec_var = f'\n                <variable name="absolute_codec_string" value="{",".join(fs_codecs)}"/>'
+    toll_allow = _TOLL_ALLOW_MAP.get(ext.call_permission, _TOLL_ALLOW_MAP["international"])
     return f"""            <user id="{xe(ext.username)}">
               <params>
-                <param name="password" value="{xe(ext.password)}"/>
+                <param name="password" value="{xe(decrypt(ext.password))}"/>
               </params>
               <variables>
                 <variable name="user_context" value="{context}"/>
@@ -167,13 +205,20 @@ def _user_xml(ext: "SIPExtension", domain: str) -> str:
                 <variable name="outbound_caller_id_number" value="{cid_num}"/>
                 <variable name="voicemail_enabled" value="{vm}"/>
                 <variable name="accountcode" value="{xe(ext.username)}"/>
-                <variable name="toll_allow" value="domestic,international,local"/>{codec_var}
+                <variable name="toll_allow" value="{toll_allow}"/>{codec_var}
+                <variable name="rtp_secure_media" value="mandatory"/>
               </variables>
             </user>"""
 
 
-def _directory_single_user(tenant: "Tenant", ext: "SIPExtension") -> str:
-    domain = xe(tenant.account_number)
+def _directory_single_user(tenant: "Tenant", ext: "SIPExtension", advertised_domain: str | None = None) -> str:
+    # FreeSWITCH (switch_xml_locate_domain, verifie dans le code source) exige que le
+    # <domain name="..."> retourne corresponde EXACTEMENT au domaine demande dans la
+    # requete originale, peu importe le vrai tenant trouve derriere. Pour une connexion
+    # "conventionnelle" (le client met l'IP du serveur comme domaine, pas le tenant),
+    # `advertised_domain` = ce que le client a envoye ; le contexte/routage interne
+    # (user_context via _user_xml) continue d'utiliser le VRAI domaine du tenant.
+    domain = xe(advertised_domain or tenant.account_number)
     dial_str = (
         "{presence_id=${dialed_user}@${dialed_domain}}"
         "${sofia_contact(*/${dialed_user}@${dialed_domain})}"
@@ -256,13 +301,14 @@ async def _handle_dialplan(form, db: AsyncSession) -> Response:
 
     if context == "sipv-internal":
         account = form.get("variable_sip_from_host", "")
-        if account:
-            return await _dialplan_internal(account, destination, db, requested_context=context)
+        caller_username = (form.get("variable_sip_from_user") or "").split("@")[0]
+        if account or caller_username:
+            return await _dialplan_internal(account, destination, db, requested_context=context, caller_username=caller_username)
 
     return _resp(NOT_FOUND)
 
 
-async def _dialplan_internal(account: str, destination: str, db: AsyncSession, requested_context: str | None = None) -> Response:
+async def _dialplan_internal(account: str, destination: str, db: AsyncSession, requested_context: str | None = None, caller_username: str | None = None) -> Response:
     """
     Dialplan for internal tenant context.
     Handles:
@@ -276,10 +322,34 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession, r
     demande, sinon FreeSWITCH rejette la reponse comme "not found" meme si elle contient
     un dialplan valide sous un autre nom.
     """
-    result = await db.execute(
-        select(Tenant).where(Tenant.account_number == account, Tenant.is_active == True)
-    )
-    tenant = result.scalar_one_or_none()
+    tenant = None
+    if account:
+        result = await db.execute(
+            select(Tenant).where(Tenant.account_number == account, Tenant.is_active == True)
+        )
+        tenant = result.scalar_one_or_none()
+
+    # Poste appelant -- necessaire pour le tenant en connexion "conventionnelle" (voir
+    # plus bas) ET pour savoir si CET appel doit etre enregistre automatiquement
+    # (record_internal_outgoing / record_external_outgoing, TASK-023.4).
+    caller_ext = None
+    if caller_username:
+        result = await db.execute(
+            select(SIPExtension).where(
+                SIPExtension.username == caller_username,
+                SIPExtension.is_active == True,
+            )
+        )
+        caller_ext = result.scalar_one_or_none()
+
+    if not tenant and caller_ext:
+        # Connexion "conventionnelle" (domaine = adresse du serveur, pas le tenant) --
+        # meme principe que _handle_directory : retrouver le tenant via le vrai lien
+        # (SIPExtension.tenant_id) du poste appelant, pas via le domaine envoye.
+        tenant = await db.get(Tenant, caller_ext.tenant_id)
+        if tenant and not tenant.is_active:
+            tenant = None
+
     if not tenant:
         return _resp(NOT_FOUND)
 
@@ -312,9 +382,10 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession, r
 
     ctx = xe(requested_context or f"internal-{account}")
     domain = xe(account)
-    ext_entries = _ext_dialplan_entries(extensions, domain)
+    ext_entries = _ext_dialplan_entries(extensions, domain, caller_ext)
     rg_entries = _ringgroup_dialplan_entries(ring_groups, domain)
-    outbound_entries = _outbound_dialplan_entries(out_routes, account)
+    gate_entries = await _call_permission_gate_entries(caller_ext, tenant, out_routes, account, db)
+    outbound_entries = _outbound_dialplan_entries(out_routes, account, caller_ext)
 
     xml = f"""{XML_HDR}
 <document type="freeswitch/xml">
@@ -339,6 +410,7 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession, r
 
 {ext_entries}
 {rg_entries}
+{gate_entries}
 {outbound_entries}
 
       <!-- Catch-all: busy -->
@@ -354,7 +426,11 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession, r
     return _resp(xml)
 
 
-def _ext_dialplan_entries(extensions: list, domain: str) -> str:
+def _ext_dialplan_entries(extensions: list, domain: str, caller_ext: "SIPExtension | None" = None) -> str:
+    # Enregistrement automatique "interne" (TASK-023.4) : declenche si le poste
+    # APPELANT a active le sortant, OU si le poste APPELE (destinataire de cette
+    # entree) a active l'entrant -- soit l'un soit l'autre suffit.
+    caller_wants_record = bool(caller_ext and caller_ext.record_internal_outgoing)
     entries = []
     for ext in extensions:
         name = xe(f"ext_{ext.extension}")
@@ -363,10 +439,11 @@ def _ext_dialplan_entries(extensions: list, domain: str) -> str:
         vm_action = ""
         if ext.voicemail_enabled:
             vm_action = f'\n          <action application="voicemail" data="default ${{domain_name}} {xe(ext.username)}"/>'
+        record_action = _record_action(caller_wants_record or ext.record_internal_incoming)
         entries.append(f"""      <!-- Extension {ext.extension}: {xe(ext.name)} -->
       <extension name="{name}">
         <condition field="destination_number" expression="^{num}$">
-          <action application="set" data="ringback=${{us-ring}}"/>
+          <action application="set" data="ringback=${{us-ring}}"/>{record_action}
           <action application="bridge" data="{bridge}"/>{vm_action}
         </condition>
       </extension>""")
@@ -399,7 +476,103 @@ def _ringgroup_dialplan_entries(ring_groups: list, domain: str) -> str:
     return "\n\n".join(entries)
 
 
-def _outbound_dialplan_entries(routes: list, account: str) -> str:
+def _resolve_call_permission(ext: "SIPExtension", tenant: "Tenant") -> dict:
+    """
+    Resolution poste -> compagnie pour le plan d'appel (TASK-S018.5). Noms de champs
+    differents entre les deux niveaux (ext.allow_canada vs tenant.default_allow_canada,
+    meme principe que voicemail S008.2) donc resolution explicite plutot que
+    resolve_setting() generique (qui suppose un getattr uniforme).
+    """
+    return {
+        "allow_canada": ext.allow_canada if ext.allow_canada is not None else tenant.default_allow_canada,
+        "allow_us": ext.allow_us if ext.allow_us is not None else tenant.default_allow_us,
+        "allow_international": ext.allow_international if ext.allow_international is not None else tenant.default_allow_international,
+        "allow_premium": ext.allow_premium if ext.allow_premium is not None else tenant.default_allow_premium,
+        "blocked_countries": ext.blocked_countries or tenant.default_blocked_countries or "",
+        "blocked_prefixes": ext.blocked_prefixes or tenant.default_blocked_prefixes or "",
+        "ld_pin": decrypt(ext.ld_pin) if ext.ld_pin else (decrypt(tenant.default_ld_pin) if tenant.default_ld_pin else None),
+        "ld_monthly_limit": ext.ld_monthly_limit if ext.ld_monthly_limit is not None else tenant.default_ld_monthly_limit,
+    }
+
+
+async def _call_permission_gate_entries(
+    caller_ext: "SIPExtension | None", tenant: "Tenant | None", out_routes: list, account: str, db: AsyncSession,
+) -> str:
+    """
+    Entrees de REJET (+ 1 entree de contournement par NIP) evaluees AVANT les routes
+    sortantes (TASK-S018.5). FreeSWITCH s'arrete a la premiere <condition> qui matche
+    dans un contexte -- les placer avant _outbound_dialplan_entries() dans le document
+    suffit a les faire gagner sur la route qui bridgerait sinon l'appel. `call_permission`
+    (S018.3) etait stocke mais jamais verifie ; ceci le cable reellement, avec les champs
+    granulaires Canada/US/international/premium/pays-prefixes-bloques/NIP/limite ajoutes
+    dans cette meme tache.
+    """
+    if not caller_ext or not tenant:
+        return ""
+    perm = _resolve_call_permission(caller_ext, tenant)
+    entries: list[str] = []
+
+    def _reject(name: str, expr: str) -> str:
+        return f'''      <extension name="{name}">
+        <condition field="destination_number" expression="{expr}">
+          <action application="respond" data="403 Forbidden"/>
+        </condition>
+      </extension>'''
+
+    # --- NIP d'autorisation : composer *80<NIP><numero> outrepasse TOUS les blocages
+    # ci-dessous (simplification assumee -- pas de bypass partiel par categorie). Le
+    # NIP est compile directement dans le motif regenere a chaque lookup xml_curl
+    # (jamais ecrit en clair sur disque) ; bridge fait directement ici (pas de
+    # "transfer" -- un transfer redeclencherait un lookup xml_curl sur le numero nu,
+    # qui repasserait par ces memes portes et annulerait le contournement).
+    if perm["ld_pin"] and out_routes:
+        trunk_id = caller_ext.preferred_trunk_id or out_routes[0].trunk_id
+        gw_name = xe(f"{account}-gw-{str(trunk_id)[:8]}")
+        entries.append(f'''      <!-- NIP d'autorisation interurbain -->
+      <extension name="ld_pin_override">
+        <condition field="destination_number" expression="^\\*80{re.escape(perm['ld_pin'])}([0-9]+)$">
+          <action application="set" data="outbound_caller_id_number=${{caller_id_number}}"/>
+          <action application="bridge" data="sofia/gateway/{gw_name}/$1"/>
+        </condition>
+      </extension>''')
+
+    # --- Limite mensuelle (cout CDR cumule depuis le 1er du mois courant, meme
+    # source que le module facturation -- pas de compteur separe a resynchroniser) ---
+    if perm["ld_monthly_limit"] is not None:
+        month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        result = await db.execute(
+            select(func.coalesce(func.sum(CDR.cost), 0)).where(
+                CDR.tenant_id == tenant.id,
+                CDR.src == caller_ext.username,
+                CDR.start_time >= month_start,
+            )
+        )
+        spent = float(result.scalar() or 0)
+        if spent >= float(perm["ld_monthly_limit"]):
+            entries.append(_reject("ld_limit_exceeded", "^(011.+|1?[2-9][0-9]{9})$"))
+
+    # --- Categories NANP ---
+    canada_alt = "|".join(sorted(CANADIAN_AREA_CODES))
+    if not perm["allow_premium"]:
+        entries.append(_reject("perm_premium", "^1?900[0-9]{7}$"))
+    if not perm["allow_international"]:
+        entries.append(_reject("perm_international", "^011([0-9]+)$"))
+    else:
+        for code in [c.strip() for c in perm["blocked_countries"].split(",") if c.strip()]:
+            entries.append(_reject(f"perm_blocked_country_{xe(code)}", f"^011{re.escape(code)}"))
+    if not perm["allow_canada"]:
+        entries.append(_reject("perm_canada", f"^1?({canada_alt})[2-9][0-9]{{6}}$"))
+    if not perm["allow_us"]:
+        entries.append(_reject("perm_us", f"^1?(?!({canada_alt}))[2-9][0-9]{{2}}[2-9][0-9]{{6}}$"))
+    for prefix in [p.strip() for p in perm["blocked_prefixes"].split(",") if p.strip()]:
+        entries.append(_reject(f"perm_blocked_prefix_{xe(prefix)}", f"^{re.escape(prefix)}"))
+
+    return "\n\n".join(entries)
+
+
+def _outbound_dialplan_entries(routes: list, account: str, caller_ext: "SIPExtension | None" = None) -> str:
+    # Enregistrement automatique "externe sortant" (TASK-023.4).
+    record_action = _record_action(bool(caller_ext and caller_ext.record_external_outgoing))
     entries = []
     for route in routes:
         patterns = [p.strip() for p in (route.dial_patterns or "").split(",") if p.strip()]
@@ -418,7 +591,7 @@ def _outbound_dialplan_entries(routes: list, account: str) -> str:
             entries.append(f"""      <!-- Outbound: {xe(route.name)} pattern {xe(pattern)} -->
       <extension name="{route_name}">
         <condition field="destination_number" expression="{xe(regex)}">
-          <action application="set" data="outbound_caller_id_number=${{caller_id_number}}"/>{strip_action}
+          <action application="set" data="outbound_caller_id_number=${{caller_id_number}}"/>{strip_action}{record_action}
           <action application="bridge" data="sofia/gateway/{gw_name}/{prepend}$1"/>
         </condition>
       </extension>""")
@@ -499,7 +672,15 @@ async def _inbound_actions(route: "InboundRoute", tenant: "Tenant", db: AsyncSes
 
     if dest_type == "extension":
         bridge = _bridge(dest, domain)
-        return f"""          <action application="set" data="ringback=${{us-ring}}"/>
+        # Enregistrement automatique "externe entrant" (TASK-023.4) -- depend du poste
+        # DESTINATAIRE (celui qui recoit l'appel externe), pas d'un poste "appelant"
+        # puisque l'appelant est externe (pas un de nos postes).
+        dest_result = await db.execute(
+            select(SIPExtension).where(SIPExtension.username == dest, SIPExtension.is_active == True)
+        )
+        dest_ext = dest_result.scalar_one_or_none()
+        record_action = _record_action(bool(dest_ext and dest_ext.record_external_incoming))
+        return f"""          <action application="set" data="ringback=${{us-ring}}"/>{record_action}
           <action application="bridge" data="{xe(bridge)}"/>"""
 
     if dest_type == "ivr":

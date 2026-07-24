@@ -23,13 +23,27 @@ class VoicemailBox(Base):
     # Email notification settings
     email_on_new: Mapped[bool] = mapped_column(Boolean, default=True)  # send email on new voicemail
     attach_message: Mapped[bool] = mapped_column(Boolean, default=True)  # attach WAV to email
-    delete_after_email: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Null = herite compagnie -> global (TASK-S008.2, voir resolution dans voicemail.py) ;
+    # valeur explicite = ce poste s'ecarte volontairement du niveau parent.
+    delete_after_email: Mapped[bool | None] = mapped_column(Boolean)
     # Asterisk options
     say_cid: Mapped[bool] = mapped_column(Boolean, default=True)
     say_duration: Mapped[bool] = mapped_column(Boolean, default=True)
     max_messages: Mapped[int] = mapped_column(Integer, default=100)
-    max_message_length: Mapped[int] = mapped_column(Integer, default=180)  # seconds
+    max_message_length: Mapped[int] = mapped_column(Integer, default=300)  # secondes (5 min, TASK-S008.2)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # --- TASK-S008.2 : accueils audio, langue, transcription ---
+    language: Mapped[str] = mapped_column(String(5), default="fr")
+    transcription_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    temp_greeting_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Chemins des fichiers audio uploades (voir endpoints upload/download) -- null =
+    # pas encore uploade, FreeSWITCH/Asterisk utilise son accueil par defaut.
+    greeting_unavailable_path: Mapped[str | None] = mapped_column(String(255))
+    greeting_busy_path: Mapped[str | None] = mapped_column(String(255))
+    greeting_name_path: Mapped[str | None] = mapped_column(String(255))
+    greeting_temp_path: Mapped[str | None] = mapped_column(String(255))
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 

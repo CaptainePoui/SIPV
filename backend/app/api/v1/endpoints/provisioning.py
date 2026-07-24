@@ -1,7 +1,10 @@
 import uuid
+import base64
+import hashlib
 from datetime import datetime, timezone
 from typing import Any
 from jinja2 import Environment, BaseLoader, TemplateError
+from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,12 +12,28 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from app.core.database import get_db
+from app.core.config import settings
 from app.api.v1.endpoints.auth import get_current_user
 from app.models.provisioning import PhoneModel, ProvisionedPhone
 from app.models.sip import SIPExtension
 from app.models.user import User
 
 router = APIRouter()
+
+# Fernet key derive de SECRET_KEY -- meme pattern que ClientAccess cote ERPCRM,
+# pas de variable d'env supplementaire necessaire (TASK-S011.2).
+_fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(settings.SECRET_KEY.encode()).digest()))
+
+
+def _encrypt(value: str) -> str:
+    return _fernet.encrypt(value.encode()).decode()
+
+
+def _decrypt(value: str) -> str:
+    try:
+        return _fernet.decrypt(value.encode()).decode()
+    except Exception:
+        return ""
 
 
 # ── Phone Models ──────────────────────────────────────────────────────────────
@@ -98,6 +117,20 @@ class PhoneOut(BaseModel):
     last_seen: datetime | None
     extra_config: dict | None
     is_active: bool
+    serial_number: str | None
+    hardware_version: str | None
+    has_admin_password: bool
+    wifi_enabled: bool
+    bluetooth_enabled: bool
+    headset_used: bool
+    expansion_module: str | None
+    # Calcule a la volee depuis last_provisioned, pas stocke (TASK-S011.2) -- "jamais" ou
+    # "provisionne" (avec la date deja dans last_provisioned). Pas de palier "en retard" :
+    # aucun seuil precis n'a ete demande, on n'en invente pas un arbitraire.
+    provisioning_status: str
+
+class PhoneAdminPasswordOut(PhoneOut):
+    admin_password: str | None = None
 
 class PhoneCreate(BaseModel):
     extension_id: uuid.UUID | None = None
@@ -106,6 +139,13 @@ class PhoneCreate(BaseModel):
     display_name: str | None = None
     location: str | None = None
     extra_config: dict | None = None
+    serial_number: str | None = None
+    hardware_version: str | None = None
+    admin_password: str | None = None
+    wifi_enabled: bool = False
+    bluetooth_enabled: bool = False
+    headset_used: bool = False
+    expansion_module: str | None = None
 
 class PhoneUpdate(BaseModel):
     extension_id: uuid.UUID | None = None
@@ -116,14 +156,32 @@ class PhoneUpdate(BaseModel):
     firmware_version: str | None = None
     extra_config: dict | None = None
     is_active: bool | None = None
+    serial_number: str | None = None
+    hardware_version: str | None = None
+    admin_password: str | None = None
+    wifi_enabled: bool | None = None
+    bluetooth_enabled: bool | None = None
+    headset_used: bool | None = None
+    expansion_module: str | None = None
+    mac_address: str | None = None  # remplacement d'appareil physique : seul le MAC/SN change
 
 
-def _phone_out(p: ProvisionedPhone) -> PhoneOut:
-    return PhoneOut(id=p.id, tenant_id=p.tenant_id, extension_id=p.extension_id,
-                    phone_model_id=p.phone_model_id, mac_address=p.mac_address,
-                    display_name=p.display_name, location=p.location, ip_address=p.ip_address,
-                    firmware_version=p.firmware_version, last_provisioned=p.last_provisioned,
-                    last_seen=p.last_seen, extra_config=p.extra_config, is_active=p.is_active)
+def _phone_out(p: ProvisionedPhone, reveal: bool = False) -> PhoneOut:
+    base = dict(
+        id=p.id, tenant_id=p.tenant_id, extension_id=p.extension_id,
+        phone_model_id=p.phone_model_id, mac_address=p.mac_address,
+        display_name=p.display_name, location=p.location, ip_address=p.ip_address,
+        firmware_version=p.firmware_version, last_provisioned=p.last_provisioned,
+        last_seen=p.last_seen, extra_config=p.extra_config, is_active=p.is_active,
+        serial_number=p.serial_number, hardware_version=p.hardware_version,
+        has_admin_password=bool(p.encrypted_admin_password),
+        wifi_enabled=p.wifi_enabled, bluetooth_enabled=p.bluetooth_enabled,
+        headset_used=p.headset_used, expansion_module=p.expansion_module,
+        provisioning_status="provisionne" if p.last_provisioned else "jamais",
+    )
+    if reveal:
+        return PhoneAdminPasswordOut(**base, admin_password=_decrypt(p.encrypted_admin_password) if p.encrypted_admin_password else None)
+    return PhoneOut(**base)
 
 
 @router.get("/tenant/{tenant_id}", response_model=list[PhoneOut])
@@ -140,7 +198,10 @@ async def create_phone(tenant_id: uuid.UUID, payload: PhoneCreate, db: AsyncSess
         raise HTTPException(status_code=409, detail="MAC address déjà enregistrée")
     data = payload.model_dump()
     data['mac_address'] = mac
+    admin_password = data.pop('admin_password', None)
     p = ProvisionedPhone(tenant_id=tenant_id, **data)
+    if admin_password:
+        p.encrypted_admin_password = _encrypt(admin_password)
     db.add(p)
     await db.commit()
     await db.refresh(p)
@@ -153,11 +214,27 @@ async def update_phone(phone_id: uuid.UUID, payload: PhoneUpdate, db: AsyncSessi
     p = result.scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Téléphone introuvable")
-    for k, v in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    admin_password_set = 'admin_password' in data
+    admin_password = data.pop('admin_password', None)
+    if 'mac_address' in data and data['mac_address']:
+        data['mac_address'] = data['mac_address'].upper().replace('-', ':')
+    for k, v in data.items():
         setattr(p, k, v)
+    if admin_password_set:
+        p.encrypted_admin_password = _encrypt(admin_password) if admin_password else None
     await db.commit()
     await db.refresh(p)
     return _phone_out(p)
+
+
+@router.get("/{phone_id}/reveal-admin-password", response_model=PhoneAdminPasswordOut)
+async def reveal_admin_password(phone_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    result = await db.execute(select(ProvisionedPhone).where(ProvisionedPhone.id == phone_id))
+    p = result.scalar_one_or_none()
+    if not p:
+        raise HTTPException(status_code=404, detail="Téléphone introuvable")
+    return _phone_out(p, reveal=True)
 
 
 @router.delete("/{phone_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -68,7 +68,21 @@ class QueueMember(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     queue_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("queues.id", ondelete="CASCADE"), nullable=False)
     extension_username: Mapped[str] = mapped_column(String(100), nullable=False)
+    # "Niveau de priorite" (TASK-S007.2) = ce champ deja existant, pas duplique --
+    # plus bas = priorite plus haute (convention standard queue ACD).
     penalty: Mapped[int] = mapped_column(Integer, default=0)
+
+    # --- TASK-S007.2 : champs agent ---
+    agent_number: Mapped[str | None] = mapped_column(String(20))
+    agent_password: Mapped[str | None] = mapped_column(String(50))  # pas chiffre -- meme
+    # convention que SIPExtension.password (valeur active necessaire au systeme, pas
+    # juste consultable par un humain).
+    is_dynamic: Mapped[bool] = mapped_column(Boolean, default=True)  # dynamique = agent peut se logguer/se delogguer
+    auto_login: Mapped[bool] = mapped_column(Boolean, default=False)
+    pause_allowed: Mapped[bool] = mapped_column(Boolean, default=True)
+    pause_reasons: Mapped[str | None] = mapped_column(String(255))  # CSV, ex: "Diner,Pause,Reunion"
+    wrap_up_time_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    skills: Mapped[str | None] = mapped_column(String(255))  # CSV
 
     queue: Mapped["Queue"] = relationship("Queue", back_populates="members")
 

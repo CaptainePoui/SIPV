@@ -7,7 +7,10 @@ from sqlalchemy import select, and_
 from pydantic import BaseModel
 from app.core.database import get_db
 from app.api.v1.endpoints.auth import get_current_user
+from app.core.esl import get_esl, ESLClient
+from app.api.v1.endpoints.esl import _parse_registrations
 from app.models.security import SecurityEvent, ACLRule, FraudRule, BlockedIP
+from app.models.sip import SIPExtension
 from app.models.user import User
 
 router = APIRouter()
@@ -94,6 +97,7 @@ async def resolve_event(event_id: uuid.UUID, db: AsyncSession = Depends(get_db),
 class ACLOut(BaseModel):
     id: uuid.UUID
     tenant_id: uuid.UUID | None
+    extension_id: uuid.UUID | None
     cidr: str
     action: str
     description: str | None
@@ -102,21 +106,31 @@ class ACLOut(BaseModel):
 
 class ACLCreate(BaseModel):
     tenant_id: uuid.UUID | None = None
+    extension_id: uuid.UUID | None = None
     cidr: str
     action: str  # allow / deny
     description: str | None = None
     priority: int = 100
 
 
+def _acl_out(r: ACLRule) -> ACLOut:
+    return ACLOut(id=r.id, tenant_id=r.tenant_id, extension_id=r.extension_id, cidr=r.cidr, action=r.action,
+                  description=r.description, priority=r.priority, is_active=r.is_active)
+
+
 @router.get("/acl", response_model=list[ACLOut])
-async def list_acl(tenant_id: uuid.UUID | None = Query(None), db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def list_acl(
+    tenant_id: uuid.UUID | None = Query(None),
+    extension_id: uuid.UUID | None = Query(None),
+    db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
+):
     q = select(ACLRule).where(ACLRule.is_active == True).order_by(ACLRule.priority, ACLRule.action)
     if tenant_id:
         q = q.where(ACLRule.tenant_id == tenant_id)
+    if extension_id:
+        q = q.where(ACLRule.extension_id == extension_id)
     result = await db.execute(q)
-    return [ACLOut(id=r.id, tenant_id=r.tenant_id, cidr=r.cidr, action=r.action,
-                   description=r.description, priority=r.priority, is_active=r.is_active)
-            for r in result.scalars().all()]
+    return [_acl_out(r) for r in result.scalars().all()]
 
 
 @router.post("/acl", response_model=ACLOut, status_code=status.HTTP_201_CREATED)
@@ -131,8 +145,37 @@ async def create_acl(payload: ACLCreate, db: AsyncSession = Depends(get_db), _: 
     db.add(r)
     await db.commit()
     await db.refresh(r)
-    return ACLOut(id=r.id, tenant_id=r.tenant_id, cidr=r.cidr, action=r.action,
-                  description=r.description, priority=r.priority, is_active=r.is_active)
+    return _acl_out(r)
+
+
+@router.post("/acl/whitelist-extension/{ext_id}", response_model=ACLOut, status_code=status.HTTP_201_CREATED)
+async def whitelist_extension_current_ip(ext_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    """
+    Ajoute l'IP publique ACTUELLE de ce poste (vue par FreeSWITCH dans sa registration
+    live) a la whitelist (allow) scopee a ce poste. Bouton "Ajouter a la whitelist"
+    depuis la fiche poste (TASK-S014.2).
+    """
+    ext = await db.get(SIPExtension, ext_id)
+    if not ext:
+        raise HTTPException(status_code=404, detail="Extension introuvable")
+    try:
+        esl: ESLClient = await get_esl()
+        raw = await esl.show_registrations()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"ESL error: {exc}")
+    regs = _parse_registrations(raw).get(ext.username, [])
+    if not regs or not regs[0].get("public_ip"):
+        raise HTTPException(status_code=400, detail="Ce poste n'est pas enregistré actuellement, aucune IP à whitelister")
+    ip = regs[0]["public_ip"]
+    r = ACLRule(
+        tenant_id=ext.tenant_id, extension_id=ext_id, cidr=f"{ip}/32", action="allow",
+        description=f"Whitelist manuelle -- IP du poste {ext.extension} au moment de l'ajout",
+        priority=10,
+    )
+    db.add(r)
+    await db.commit()
+    await db.refresh(r)
+    return _acl_out(r)
 
 
 @router.delete("/acl/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -157,6 +200,7 @@ class FraudOut(BaseModel):
     block_premium: bool
     alert_email: str | None
     auto_block_on_alert: bool
+    max_failed_auth_attempts: int | None
     is_active: bool
 
 class FraudUpsert(BaseModel):
@@ -167,6 +211,7 @@ class FraudUpsert(BaseModel):
     block_premium: bool = True
     alert_email: str | None = None
     auto_block_on_alert: bool = False
+    max_failed_auth_attempts: int | None = 5
     is_active: bool = True
 
 
@@ -175,7 +220,8 @@ def _fraud_out(f: FraudRule) -> FraudOut:
                     max_concurrent_calls=f.max_concurrent_calls,
                     max_international_calls_per_day=f.max_international_calls_per_day,
                     block_international=f.block_international, block_premium=f.block_premium,
-                    alert_email=f.alert_email, auto_block_on_alert=f.auto_block_on_alert, is_active=f.is_active)
+                    alert_email=f.alert_email, auto_block_on_alert=f.auto_block_on_alert,
+                    max_failed_auth_attempts=f.max_failed_auth_attempts, is_active=f.is_active)
 
 
 @router.get("/fraud/{tenant_id}", response_model=FraudOut)

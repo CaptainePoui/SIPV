@@ -44,3 +44,26 @@ class DID911Assignment(Base):
     alert_email: Mapped[str | None] = mapped_column(String(255))    # notify on 911 call
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ExtensionE911Assignment(Base):
+    """
+    Lie une extension (poste) a une adresse 911 -- TASK-S010.2. Meme principe que
+    DID911Assignment, mais au niveau du poste plutot que du DID entrant : pertinent
+    pour la localisation repartissable (dispatchable location) quand plusieurs postes
+    d'une meme compagnie sont a des etages/bureaux differents d'un meme immeuble, ou a
+    des succursales differentes (reutilise SIPExtension.site pour la succursale --
+    pas duplique ici, voir TASK-S018.3).
+    """
+    __tablename__ = "extension_911_assignments"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    extension_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sip_extensions.id", ondelete="CASCADE"), nullable=False, unique=True)
+    e911_address_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("e911_addresses.id", ondelete="CASCADE"), nullable=False)
+    emergency_location: Mapped[str | None] = mapped_column(String(200))  # ex: "Pres de la sortie nord"
+    floor: Mapped[str | None] = mapped_column(String(20))
+    office: Mapped[str | None] = mapped_column(String(50))
+    alert_email: Mapped[str | None] = mapped_column(String(255))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

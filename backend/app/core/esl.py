@@ -146,6 +146,21 @@ class ESLClient:
         """List all current SIP registrations."""
         return await self.api("show registrations as json")
 
+    async def sofia_status_profile_reg(self, profile: str) -> str:
+        """
+        Detail text (PAS JSON -- 'show registrations as json' n'a pas ces champs) avec
+        Ping-Status/Ping-Time/EXPSECS par registration. TASK-S020.2.
+        """
+        return await self.api(f"sofia status profile {profile} reg")
+
+    async def show_channels(self) -> str:
+        """Liste des appels actifs (channels), format JSON. TASK-S020.2."""
+        return await self.api("show channels as json")
+
+    async def uuid_getvar(self, call_uuid: str, var: str) -> str:
+        """Lit une variable de canal sur un appel actif (ex: stats RTP). TASK-S020.2."""
+        return await self.api(f"uuid_getvar {call_uuid} {var}")
+
     async def uuid_kill(self, uuid: str) -> str:
         """Hang up an active call by UUID."""
         return await self.api(f"uuid_kill {uuid}")

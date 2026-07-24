@@ -113,10 +113,15 @@ export default function Security() {
             <button className="btn btn-primary btn-sm" onClick={() => setShowACLModal(true)}>+ Règle ACL</button>
           </div>
           <table>
-            <thead><tr><th>CIDR</th><th>Action</th><th>Description</th><th>Priorité</th><th></th></tr></thead>
+            <thead><tr><th>Portée</th><th>CIDR</th><th>Action</th><th>Description</th><th>Priorité</th><th></th></tr></thead>
             <tbody>
               {acl.map(r => (
                 <tr key={r.id}>
+                  <td>
+                    <span className={`badge ${r.extension_id ? 'badge-blue' : r.tenant_id ? 'badge-orange' : 'badge-gray'}`}>
+                      {r.extension_id ? 'Poste' : r.tenant_id ? 'Compagnie' : 'Global'}
+                    </span>
+                  </td>
                   <td><code>{r.cidr}</code></td>
                   <td><span className={`badge ${r.action === 'allow' ? 'badge-green' : 'badge-red'}`}>{r.action}</span></td>
                   <td>{r.description || '—'}</td>

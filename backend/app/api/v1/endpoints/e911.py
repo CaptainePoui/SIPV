@@ -6,7 +6,7 @@ from sqlalchemy import select
 from pydantic import BaseModel
 from app.core.database import get_db
 from app.api.v1.endpoints.auth import get_current_user
-from app.models.e911 import E911Address, DID911Assignment
+from app.models.e911 import E911Address, DID911Assignment, ExtensionE911Assignment
 from app.models.user import User
 
 router = APIRouter()
@@ -164,6 +164,97 @@ async def delete_assignment(assign_id: uuid.UUID, db: AsyncSession = Depends(get
         raise HTTPException(status_code=404, detail="Assignment 911 introuvable")
     await db.delete(x)
     await db.commit()
+
+
+# ── Extension (poste) 911 Assignments -- TASK-S010.2 ────────────────────────────
+
+class ExtAssignmentOut(BaseModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    extension_id: uuid.UUID
+    e911_address_id: uuid.UUID
+    emergency_location: str | None
+    floor: str | None
+    office: str | None
+    alert_email: str | None
+    is_active: bool
+
+class ExtAssignmentCreate(BaseModel):
+    extension_id: uuid.UUID
+    e911_address_id: uuid.UUID
+    emergency_location: str | None = None
+    floor: str | None = None
+    office: str | None = None
+    alert_email: str | None = None
+
+
+def _ext_assign_out(x: ExtensionE911Assignment) -> ExtAssignmentOut:
+    return ExtAssignmentOut(id=x.id, tenant_id=x.tenant_id, extension_id=x.extension_id,
+                            e911_address_id=x.e911_address_id, emergency_location=x.emergency_location,
+                            floor=x.floor, office=x.office, alert_email=x.alert_email, is_active=x.is_active)
+
+
+@router.get("/extension-assignments/tenant/{tenant_id}", response_model=list[ExtAssignmentOut])
+async def list_extension_assignments(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    result = await db.execute(select(ExtensionE911Assignment).where(ExtensionE911Assignment.tenant_id == tenant_id))
+    return [_ext_assign_out(x) for x in result.scalars().all()]
+
+
+@router.get("/extension-assignments/by-extension/{extension_id}", response_model=ExtAssignmentOut)
+async def get_extension_assignment(extension_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    result = await db.execute(select(ExtensionE911Assignment).where(ExtensionE911Assignment.extension_id == extension_id))
+    x = result.scalar_one_or_none()
+    if not x:
+        raise HTTPException(status_code=404, detail="Aucune adresse 911 assignée à ce poste")
+    return _ext_assign_out(x)
+
+
+@router.post("/extension-assignments/tenant/{tenant_id}", response_model=ExtAssignmentOut, status_code=status.HTTP_201_CREATED)
+async def create_extension_assignment(tenant_id: uuid.UUID, payload: ExtAssignmentCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    existing = await db.execute(select(ExtensionE911Assignment).where(ExtensionE911Assignment.extension_id == payload.extension_id))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Ce poste a déjà une adresse 911 assignée")
+    x = ExtensionE911Assignment(tenant_id=tenant_id, **payload.model_dump())
+    db.add(x)
+    await db.commit()
+    await db.refresh(x)
+    return _ext_assign_out(x)
+
+
+@router.put("/extension-assignments/{assign_id}", response_model=ExtAssignmentOut)
+async def update_extension_assignment(assign_id: uuid.UUID, payload: ExtAssignmentCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    result = await db.execute(select(ExtensionE911Assignment).where(ExtensionE911Assignment.id == assign_id))
+    x = result.scalar_one_or_none()
+    if not x:
+        raise HTTPException(status_code=404, detail="Assignment 911 introuvable")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(x, k, v)
+    await db.commit()
+    await db.refresh(x)
+    return _ext_assign_out(x)
+
+
+@router.delete("/extension-assignments/{assign_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_extension_assignment(assign_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    result = await db.execute(select(ExtensionE911Assignment).where(ExtensionE911Assignment.id == assign_id))
+    x = result.scalar_one_or_none()
+    if not x:
+        raise HTTPException(status_code=404, detail="Assignment 911 introuvable")
+    await db.delete(x)
+    await db.commit()
+
+
+@router.get("/extensions-without-911/tenant/{tenant_id}")
+async def extensions_without_911(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    """Postes actifs sans adresse 911 assignee -- alerte de conformite (miroir de dids-without-911)."""
+    from app.models.sip import SIPExtension
+    all_ext = await db.execute(select(SIPExtension.id, SIPExtension.extension).where(
+        SIPExtension.tenant_id == tenant_id, SIPExtension.is_active == True
+    ))
+    assigned = await db.execute(select(ExtensionE911Assignment.extension_id).where(ExtensionE911Assignment.tenant_id == tenant_id))
+    assigned_ids = {r[0] for r in assigned.all()}
+    missing = [{"extension_id": str(r[0]), "extension": r[1]} for r in all_ext.all() if r[0] not in assigned_ids]
+    return {"count": len(missing), "extensions_without_911": missing}
 
 
 @router.get("/dids-without-911/tenant/{tenant_id}")

@@ -7,8 +7,9 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     # Network — change these when migrating servers
     SIPV_HOST: str = "192.168.1.55"
+    SIPV_PUBLIC_IP: str = "142.112.42.52"  # IP publique -- utilisee comme outbound proxy pour les postes (fonctionne local + distant via hairpin NAT)
     ERPCRM_HOST: str = "192.168.1.9"
-    ERPCRM_API_URL: str = "http://192.168.1.9:8010"
+    ERPCRM_API_URL: str = "https://192.168.1.9:8011"
     ERPCRM_API_KEY: str = ""  # cle que ERPCRM doit presenter en X-Api-Key pour appeler SIPV (/sync/company)
     SIPV_API_KEY: str = ""  # cle que SIPV doit presenter en X-Api-Key pour appeler ERPCRM (/contacts, /sipv/event)
     # FreeSWITCH ESL (Event Socket Library)

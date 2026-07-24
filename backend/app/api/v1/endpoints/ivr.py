@@ -107,6 +107,45 @@ class QueueMemberOut(BaseModel):
     id: uuid.UUID
     extension_username: str
     penalty: int
+    agent_number: str | None
+    agent_password: str | None
+    is_dynamic: bool
+    auto_login: bool
+    pause_allowed: bool
+    pause_reasons: str | None
+    wrap_up_time_seconds: int
+    skills: str | None
+
+class QueueMemberCreate(BaseModel):
+    extension_username: str
+    penalty: int = 0
+    agent_number: str | None = None
+    agent_password: str | None = None
+    is_dynamic: bool = True
+    auto_login: bool = False
+    pause_allowed: bool = True
+    pause_reasons: str | None = None
+    wrap_up_time_seconds: int = 0
+    skills: str | None = None
+
+class QueueMemberUpdate(BaseModel):
+    penalty: int | None = None
+    agent_number: str | None = None
+    agent_password: str | None = None
+    is_dynamic: bool | None = None
+    auto_login: bool | None = None
+    pause_allowed: bool | None = None
+    pause_reasons: str | None = None
+    wrap_up_time_seconds: int | None = None
+    skills: str | None = None
+
+def _member_out(m: QueueMember) -> QueueMemberOut:
+    return QueueMemberOut(
+        id=m.id, extension_username=m.extension_username, penalty=m.penalty,
+        agent_number=m.agent_number, agent_password=m.agent_password, is_dynamic=m.is_dynamic,
+        auto_login=m.auto_login, pause_allowed=m.pause_allowed, pause_reasons=m.pause_reasons,
+        wrap_up_time_seconds=m.wrap_up_time_seconds, skills=m.skills,
+    )
 
 class QueueOut(BaseModel):
     id: uuid.UUID
@@ -135,7 +174,7 @@ def _queue_out(q: Queue) -> QueueOut:
         id=q.id, tenant_id=q.tenant_id, name=q.name, queue_name=q.queue_name,
         strategy=q.strategy, timeout_seconds=q.timeout_seconds, max_wait_seconds=q.max_wait_seconds,
         no_answer_destination=q.no_answer_destination, is_active=q.is_active, created_at=q.created_at,
-        members=[QueueMemberOut(id=m.id, extension_username=m.extension_username, penalty=m.penalty) for m in q.members],
+        members=[_member_out(m) for m in q.members],
     )
 
 
@@ -177,6 +216,50 @@ async def delete_queue(queue_id: uuid.UUID, db: AsyncSession = Depends(get_db), 
     db.add(PendingChange(tenant_id=q.tenant_id, change_type="remove_queue", entity_type="queue",
                          entity_id=str(queue_id), payload={"queue_name": q.queue_name}, created_by=user.email))
     await db.delete(q)
+    await db.commit()
+
+
+@router.post("/queues/{queue_id}/members", response_model=QueueMemberOut, status_code=status.HTTP_201_CREATED)
+async def add_queue_member(queue_id: uuid.UUID, payload: QueueMemberCreate, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    q = await db.get(Queue, queue_id)
+    if not q:
+        raise HTTPException(status_code=404, detail="File d'attente introuvable")
+    m = QueueMember(queue_id=queue_id, **payload.model_dump())
+    db.add(m)
+    db.add(PendingChange(tenant_id=q.tenant_id, change_type="add_queue_member", entity_type="queue",
+                         entity_id=str(queue_id), payload={"extension_username": payload.extension_username}, created_by=user.email))
+    await db.commit()
+    await db.refresh(m)
+    return _member_out(m)
+
+
+@router.put("/queues/members/{member_id}", response_model=QueueMemberOut)
+async def update_queue_member(member_id: uuid.UUID, payload: QueueMemberUpdate, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    result = await db.execute(select(QueueMember).where(QueueMember.id == member_id))
+    m = result.scalar_one_or_none()
+    if not m:
+        raise HTTPException(status_code=404, detail="Membre introuvable")
+    data = payload.model_dump(exclude_unset=True)
+    for k, v in data.items():
+        setattr(m, k, v)
+    q = await db.get(Queue, m.queue_id)
+    db.add(PendingChange(tenant_id=q.tenant_id, change_type="update_queue_member", entity_type="queue",
+                         entity_id=str(m.queue_id), payload={"extension_username": m.extension_username, **{k: str(v) for k, v in data.items()}}, created_by=user.email))
+    await db.commit()
+    await db.refresh(m)
+    return _member_out(m)
+
+
+@router.delete("/queues/members/{member_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_queue_member(member_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    result = await db.execute(select(QueueMember).where(QueueMember.id == member_id))
+    m = result.scalar_one_or_none()
+    if not m:
+        raise HTTPException(status_code=404, detail="Membre introuvable")
+    q = await db.get(Queue, m.queue_id)
+    db.add(PendingChange(tenant_id=q.tenant_id, change_type="remove_queue_member", entity_type="queue",
+                         entity_id=str(m.queue_id), payload={"extension_username": m.extension_username}, created_by=user.email))
+    await db.delete(m)
     await db.commit()
 
 

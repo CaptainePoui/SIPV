@@ -22,7 +22,7 @@ async def log_audit(
     db: AsyncSession,
     *,
     request: Request,
-    user: User,
+    user: User | None,
     entity_type: str,
     action: str,                          # "create" | "update" | "delete"
     old_data: dict[str, Any] | None,
@@ -39,7 +39,7 @@ async def log_audit(
         action=action,
         old_data=old_data,
         new_data=new_data,
-        changed_by=user.email,
+        changed_by=user.email if user else "erpcrm-proxy",
         changed_by_ip=get_client_ip(request),
     )
     db.add(entry)
