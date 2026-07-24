@@ -1,5 +1,6 @@
 import uuid
 import secrets
+import asyncio
 from pathlib import Path
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
@@ -241,12 +242,26 @@ async def upload_greeting(
     if not v:
         raise HTTPException(status_code=404, detail="Boîte vocale introuvable")
 
+    # TASK-023.16 : importer dans n'importe quel format, conversion automatique vers
+    # le format attendu par FreeSWITCH (WAV PCM 8kHz mono, meme convention que les
+    # enregistrements d'appels TASK-023.4). ffmpeg installe sur ce serveur (apt,
+    # universe Ubuntu, meme principe que kamailio/rtpengine -- aucun depot tiers).
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    ext = Path(file.filename or "").suffix or ".wav"
-    filename = f"{vm_id}_{greeting_type}{ext}"
-    dest = UPLOAD_DIR / filename
+    raw_ext = Path(file.filename or "").suffix or ".tmp"
+    raw_path = UPLOAD_DIR / f"{vm_id}_{greeting_type}_raw{raw_ext}"
     content = await file.read()
-    dest.write_bytes(content)
+    raw_path.write_bytes(content)
+
+    filename = f"{vm_id}_{greeting_type}.wav"
+    dest = UPLOAD_DIR / filename
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y", "-i", str(raw_path), "-ar", "8000", "-ac", "1", "-acodec", "pcm_s16le", str(dest),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    raw_path.unlink(missing_ok=True)
+    if proc.returncode != 0:
+        raise HTTPException(status_code=400, detail=f"Conversion audio échouée (format non reconnu) : {stderr.decode(errors='replace')[:300]}")
 
     setattr(v, _GREETING_FIELD[greeting_type], filename)
     db.add(PendingChange(tenant_id=v.tenant_id, change_type="update_voicemail", entity_type="voicemail",

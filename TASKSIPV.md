@@ -1998,6 +1998,28 @@ Testé en direct, entièrement via l'API (aucune donnée existante avant/après 
 - Les 2 postes de test TLS toujours `Registered` sans interruption après les 2
   redémarrages du service pendant cette tâche.
 
+### TASK-023.16 [x] Conversion automatique du format d'accueil vocal importé
+Demande de l'utilisateur : importer un accueil dans N'IMPORTE QUEL format, converti
+automatiquement vers le format attendu par le serveur (avant : upload brut, aucune
+conversion, TASK-S008.2).
+
+Fait : `ffmpeg` installé (apt, universe Ubuntu, même principe que kamailio/rtpengine
+-- aucun dépôt tiers, absent avant cette tâche). `upload_greeting()` sauvegarde
+d'abord le fichier brut, lance `ffmpeg -ar 8000 -ac 1 -acodec pcm_s16le` (WAV PCM
+8kHz mono, même convention que les enregistrements d'appels TASK-023.4) via
+`asyncio.create_subprocess_exec` (pas de `subprocess.run` bloquant dans une route
+async), supprime le brut, renomme toujours en `.wav` (peu importe le format source).
+Erreur de conversion (format non reconnu par ffmpeg) → 400 explicite plutôt qu'un
+fichier corrompu silencieusement accepté.
+
+Testé en direct avec un vrai fichier : ton de test généré en MP3 44.1kHz stéréo
+(`ffmpeg -f lavfi sine=440`), uploadé sur une boîte vocale de test (poste 100) →
+fichier résultant vérifié via `ffprobe` : `pcm_s16le, 8000 Hz, 1 channel` --
+conversion confirmée réelle, pas juste renommée. Boîte vocale de test + fichier
+supprimés après coup. Les 3 postes de test restent `Registered`.
+Fichiers : sipv/backend/app/api/v1/endpoints/voicemail.py (ffmpeg installé
+séparément sur le serveur, pas dans le dépôt git).
+
 ### TASK-S014.2 [~] Onglet Sécurité — whitelist/blacklist par poste et compagnie + seuils F2B
 Dépend de : TASK-S014 (ACLRule/BlockedIP/FraudRule existants)
 
