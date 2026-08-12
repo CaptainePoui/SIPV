@@ -7,8 +7,9 @@ from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.crypto import encrypt
-from app.api.v1.endpoints.auth import get_current_user
+from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
 from app.models.tenant import Tenant
+from app.models.server import SipvServer
 from app.models.user import User
 
 router = APIRouter()
@@ -25,6 +26,8 @@ class TenantOut(BaseModel):
     max_trunks: int
     notes: str | None
     created_at: datetime
+    server_id: uuid.UUID | None = None
+    server_name: str | None = None  # TASK-S042 -- fondation multi-serveur
     extension_count: int = 0
     trunk_count: int = 0
     did_count: int = 0
@@ -40,6 +43,10 @@ class TenantOut(BaseModel):
     default_ld_monthly_limit: float | None = None
     default_caller_id_name: str | None = None
     default_caller_id_number: str | None = None
+    phone_option_defaults: dict | None = None  # TASK-S011.5
+    selected_tenant_template_ids: list[uuid.UUID] = []  # TASK-S044.2
+    selected_global_template_ids: list[uuid.UUID] = []  # TASK-S044.2
+    moh_shuffle: bool = True  # TASK-S033.2
 
 class TenantCreate(BaseModel):
     account_number: str
@@ -67,6 +74,10 @@ class TenantUpdate(BaseModel):
     default_ld_monthly_limit: float | None = None
     default_caller_id_name: str | None = None
     default_caller_id_number: str | None = None
+    phone_option_defaults: dict | None = None  # TASK-S011.5
+    selected_tenant_template_ids: list[uuid.UUID] | None = None  # TASK-S044.2
+    selected_global_template_ids: list[uuid.UUID] | None = None  # TASK-S044.2
+    moh_shuffle: bool | None = None  # TASK-S033.2
 
 
 def _tenant_out(t: Tenant) -> TenantOut:
@@ -84,13 +95,18 @@ def _tenant_out(t: Tenant) -> TenantOut:
         default_blocked_countries=t.default_blocked_countries, default_blocked_prefixes=t.default_blocked_prefixes,
         has_default_ld_pin=bool(t.default_ld_pin), default_ld_monthly_limit=float(t.default_ld_monthly_limit) if t.default_ld_monthly_limit is not None else None,
         default_caller_id_name=t.default_caller_id_name, default_caller_id_number=t.default_caller_id_number,
+        server_id=t.server_id, server_name=t.server.name if t.server else None,
+        phone_option_defaults=t.phone_option_defaults,
+        selected_tenant_template_ids=t.selected_tenant_template_ids or [],
+        selected_global_template_ids=t.selected_global_template_ids or [],
+        moh_shuffle=t.moh_shuffle,
     )
 
 
 @router.get("/", response_model=list[TenantOut])
 async def list_tenants(db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
     result = await db.execute(
-        select(Tenant).options(selectinload(Tenant.extensions), selectinload(Tenant.trunks), selectinload(Tenant.dids))
+        select(Tenant).options(selectinload(Tenant.extensions), selectinload(Tenant.trunks), selectinload(Tenant.dids), selectinload(Tenant.server))
         .order_by(Tenant.company_name)
     )
     return [_tenant_out(t) for t in result.scalars().all()]
@@ -102,11 +118,15 @@ async def create_tenant(payload: TenantCreate, db: AsyncSession = Depends(get_db
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Numéro de compte déjà utilisé")
     context_prefix = f"t-{payload.account_number.lower().replace(' ', '_').replace('-', '_')}"
-    t = Tenant(context_prefix=context_prefix, **payload.model_dump())
+    # TASK-S042 : assigne automatiquement le serveur actif par defaut (aujourd'hui
+    # un seul existe) -- quand plusieurs serveurs existeront, le futur dispatcheur
+    # central choisira lequel utiliser au lieu de ce comportement "premier trouve".
+    default_server = (await db.execute(select(SipvServer).where(SipvServer.is_active == True).order_by(SipvServer.created_at))).scalars().first()
+    t = Tenant(context_prefix=context_prefix, server_id=default_server.id if default_server else None, **payload.model_dump())
     db.add(t)
     await db.flush()
     result = await db.execute(
-        select(Tenant).options(selectinload(Tenant.extensions), selectinload(Tenant.trunks), selectinload(Tenant.dids))
+        select(Tenant).options(selectinload(Tenant.extensions), selectinload(Tenant.trunks), selectinload(Tenant.dids), selectinload(Tenant.server))
         .where(Tenant.id == t.id)
     )
     t = result.scalar_one()
@@ -115,9 +135,9 @@ async def create_tenant(payload: TenantCreate, db: AsyncSession = Depends(get_db
 
 
 @router.get("/{tenant_id}", response_model=TenantOut)
-async def get_tenant(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def get_tenant(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(
-        select(Tenant).options(selectinload(Tenant.extensions), selectinload(Tenant.trunks), selectinload(Tenant.dids))
+        select(Tenant).options(selectinload(Tenant.extensions), selectinload(Tenant.trunks), selectinload(Tenant.dids), selectinload(Tenant.server))
         .where(Tenant.id == tenant_id)
     )
     t = result.scalar_one_or_none()
@@ -127,9 +147,9 @@ async def get_tenant(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _
 
 
 @router.put("/{tenant_id}", response_model=TenantOut)
-async def update_tenant(tenant_id: uuid.UUID, payload: TenantUpdate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def update_tenant(tenant_id: uuid.UUID, payload: TenantUpdate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(
-        select(Tenant).options(selectinload(Tenant.extensions), selectinload(Tenant.trunks), selectinload(Tenant.dids))
+        select(Tenant).options(selectinload(Tenant.extensions), selectinload(Tenant.trunks), selectinload(Tenant.dids), selectinload(Tenant.server))
         .where(Tenant.id == tenant_id)
     )
     t = result.scalar_one_or_none()
@@ -139,12 +159,19 @@ async def update_tenant(tenant_id: uuid.UUID, payload: TenantUpdate, db: AsyncSe
     if "default_ld_pin" in data:
         raw = data.pop("default_ld_pin")
         t.default_ld_pin = encrypt(raw) if raw else None
+    moh_shuffle_changed = "moh_shuffle" in data
     for k, v in data.items():
         setattr(t, k, v)
     t.updated_at = datetime.now(timezone.utc)
     await db.commit()
+    if moh_shuffle_changed:
+        # TASK-S033.2 : regenere le fragment local_stream de ce tenant tout de
+        # suite pour que le nouvel ordre (liste/aleatoire) s'applique sans
+        # attendre un prochain upload/selection MOH.
+        from app.core.local_stream import regenerate_tenant_moh_stream
+        await regenerate_tenant_moh_stream(tenant_id, db)
     result = await db.execute(
-        select(Tenant).options(selectinload(Tenant.extensions), selectinload(Tenant.trunks), selectinload(Tenant.dids))
+        select(Tenant).options(selectinload(Tenant.extensions), selectinload(Tenant.trunks), selectinload(Tenant.dids), selectinload(Tenant.server))
         .where(Tenant.id == tenant_id)
     )
     return _tenant_out(result.scalar_one())

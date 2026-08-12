@@ -10,10 +10,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
+from app.api.v1.endpoints.xml_curl import REG_DOMAIN
 from app.core.esl import get_esl, ESLClient
 from app.models.user import User
 from app.models.sip import SIPExtension
-from app.models.tenant import Tenant
 from app.models.security import BlockedIP
 from app.core.database import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,6 +46,17 @@ def _parse_registrations(raw: str) -> dict[str, list[dict]]:
     Retourne une LISTE par username (un poste peut avoir plusieurs appareils
     enregistres simultanement si max_contacts > 1 -- TASK-S011.2) au lieu d'ecraser
     silencieusement les enregistrements multiples comme avant.
+
+    ⚠️ Bug corrige (TASK-023.28) : ne conservait QUE `reg_user` (le username seul),
+    sans le `realm`. Un poste mal configure sur le telephone (SIP Server pointant
+    l'IP de la box au lieu du domaine tenant, ex: "t1001") s'enregistre quand meme
+    aupres de FreeSWITCH -- juste sous le mauvais realm ("192.168.1.55" au lieu de
+    "t1001") -- et apparaissait donc "enregistre" (vert) alors qu'aucun appel
+    entrant/sortant ne peut reellement l'atteindre (le dialplan bridge toujours vers
+    `user/{username}@{domaine du tenant}`). Confirme en direct le 2026-07-24 : poste
+    t1001-102 (GXP2135) visible avec `realm=192.168.1.55` pendant qu'un appel entrant
+    echouait en `USER_NOT_REGISTERED`. Le realm est maintenant retourne avec chaque
+    entree ; c'est a l'appelant (qui connait le domaine attendu) de filtrer.
     """
     try:
         data = json.loads(raw)
@@ -62,6 +73,7 @@ def _parse_registrations(raw: str) -> dict[str, list[dict]]:
             "public_ip": row.get("network_ip"),
             "private_ip": m.group(1) if m else None,
             "port": row.get("network_port"),
+            "realm": row.get("realm"),
         })
     return result
 
@@ -119,8 +131,14 @@ def _lookup_call_state(channel_states: list[tuple[str, str]], username: str) -> 
 # ── Status ────────────────────────────────────────────────────────────────────
 
 @router.get("/status", response_model=ESLStatusOut)
-async def esl_status(_: User = Depends(get_current_user)):
-    """FreeSWITCH ESL connection status + sofia profile overview."""
+async def esl_status(_: User | None = Depends(get_current_user_or_service)):
+    """
+    FreeSWITCH ESL connection status + sofia profile overview. Accepte aussi la cle
+    de service ERPCRM (TASK-023.32) -- sert a afficher "connecte a FreeSWITCH" cote
+    fiche contact, un fait global (le lien SIPV<->FreeSWITCH) pas specifique a un
+    poste, distinct du statut d'enregistrement du poste (deja couvert par
+    /registrations, TASK-023.7).
+    """
     try:
         esl = await get_esl()
         sofia = await esl.sofia_status()
@@ -189,7 +207,11 @@ async def tenant_registrations(
     channel_states = _parse_channel_states(channels_raw)
     out = []
     for ext in extensions:
-        reg_list = regs.get(ext.username, [])
+        # Seuls les enregistrements sous le BON domaine comptent (TASK-023.28,
+        # ajuste TASK-023.33) -- le domaine d'enregistrement est desormais FIXE
+        # pour tous les tenants (REG_DOMAIN, plus par tenant) : le tenant est
+        # identifie par le username, pas par le domaine que le poste envoie.
+        reg_list = [r for r in regs.get(ext.username, []) if r.get("realm") == REG_DOMAIN]
         reg = reg_list[0] if reg_list else None
         out.append(RegistrationOut(
             username=ext.username,
@@ -211,16 +233,11 @@ async def extension_registration(username: str, db: AsyncSession = Depends(get_d
     besoin de "user@domain", pas juste "user" -- sans le domaine, FreeSWITCH repond
     systematiquement "error/user_not_registered" meme quand le poste EST enregistre
     (verifie : `sofia_contact internal/t1001-100` echoue, `.../t1001-100@t1001`
-    fonctionne). Le domaine = le tenant.account_number (meme valeur que le prefixe
-    du username), recupere via une vraie requete DB plutot que de parser la string.
+    fonctionne). Le domaine d'enregistrement est desormais FIXE (REG_DOMAIN, TASK-023.33)
+    pour tous les tenants -- plus besoin de chercher le tenant pour ca, le username
+    seul suffit a l'identifier ailleurs dans le systeme.
     """
-    ext_result = await db.execute(select(SIPExtension).where(SIPExtension.username == username))
-    ext = ext_result.scalar_one_or_none()
-    domain = None
-    if ext:
-        tenant = await db.get(Tenant, ext.tenant_id)
-        domain = tenant.account_number if tenant else None
-    lookup = f"{username}@{domain}" if domain else username
+    lookup = f"{username}@{REG_DOMAIN}"
     try:
         esl: ESLClient = await get_esl()
         contact = await esl.sofia_contact("internal", lookup)
@@ -230,7 +247,7 @@ async def extension_registration(username: str, db: AsyncSession = Depends(get_d
         is_blocked = False
         if registered:
             raw = await esl.show_registrations()
-            reg_list = _parse_registrations(raw).get(username, [])
+            reg_list = [r for r in _parse_registrations(raw).get(username, []) if r.get("realm") == REG_DOMAIN]
             registered_count = len(reg_list)
             public_ip = reg_list[0]["public_ip"] if reg_list else None
             if public_ip:

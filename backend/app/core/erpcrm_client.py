@@ -63,3 +63,32 @@ async def update_contact(contact_id: str, **fields) -> dict:
         )
         resp.raise_for_status()
         return resp.json()
+
+
+async def send_billing_event(
+    tenant_id: str, action: str, service_type: str, service_ref: str,
+    description: str | None = None, effective_date: str | None = None,
+) -> dict | None:
+    """
+    TASK-021/S032 : notifie ERPCRM d'un ajout/retrait de service facturable
+    (poste, DID). Best-effort volontaire -- appele APRES le commit de l'action
+    principale (creation/suppression du poste), ne doit jamais faire echouer
+    cette action si ERPCRM est injoignable ou si la compagnie n'a pas de
+    recurrence active (ERPCRM retourne {"status": "ignored", ...} dans ce cas,
+    ce n'est pas une erreur).
+    effective_date (TASK-033) : date reelle de debut du service (ex: date de
+    portabilite choisie a la creation) -- sert au calcul du prorata cote
+    ERPCRM. Format ISO (YYYY-MM-DD). Omis = ERPCRM utilise aujourd'hui.
+    """
+    async with _client() as client:
+        resp = await client.post(
+            f"{settings.ERPCRM_API_URL}/api/v1/billing/sipv-event",
+            json={
+                "tenant_id": tenant_id, "action": action, "service_type": service_type,
+                "service_ref": service_ref, "description": description,
+                "effective_date": effective_date,
+            },
+            headers=_headers(),
+        )
+        resp.raise_for_status()
+        return resp.json()

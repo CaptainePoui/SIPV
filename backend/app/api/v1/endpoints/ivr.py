@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from app.core.database import get_db
 from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
-from app.models.ivr import IVR, IVROption, Queue, QueueMember, RingGroup, RingGroupMember, PagingGroup, PagingGroupMember
+from app.models.ivr import IVR, IVROption, Queue, QueueMember, RingGroup, RingGroupMember, RingGroupFailoverStep, PagingGroup, PagingGroupMember
 from app.models.pending_change import PendingChange
 from app.models.sip import SIPExtension
 from app.models.user import User
@@ -39,6 +39,7 @@ class IVROut(BaseModel):
     name: str
     description: str | None
     greeting_text: str | None
+    greeting_prompt_id: uuid.UUID | None
     timeout_seconds: int
     max_retries: int
     invalid_destination: str | None
@@ -51,17 +52,30 @@ class IVRCreate(BaseModel):
     name: str
     description: str | None = None
     greeting_text: str | None = None
+    greeting_prompt_id: uuid.UUID | None = None
     timeout_seconds: int = 10
     max_retries: int = 3
     invalid_destination: str | None = None
     timeout_destination: str | None = None
     options: list[IVROptionCreate] = []
 
+class IVRUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    greeting_text: str | None = None
+    greeting_prompt_id: uuid.UUID | None = None
+    timeout_seconds: int | None = None
+    max_retries: int | None = None
+    invalid_destination: str | None = None
+    timeout_destination: str | None = None
+    is_active: bool | None = None
+
 
 def _ivr_out(ivr: IVR) -> IVROut:
     return IVROut(
         id=ivr.id, tenant_id=ivr.tenant_id, name=ivr.name, description=ivr.description,
-        greeting_text=ivr.greeting_text, timeout_seconds=ivr.timeout_seconds, max_retries=ivr.max_retries,
+        greeting_text=ivr.greeting_text, greeting_prompt_id=ivr.greeting_prompt_id,
+        timeout_seconds=ivr.timeout_seconds, max_retries=ivr.max_retries,
         invalid_destination=ivr.invalid_destination, timeout_destination=ivr.timeout_destination,
         is_active=ivr.is_active, created_at=ivr.created_at,
         options=[IVROptionOut(id=o.id, digit=o.digit, label=o.label, destination_type=o.destination_type, destination=o.destination) for o in ivr.options],
@@ -88,6 +102,21 @@ async def create_ivr(tenant_id: uuid.UUID, payload: IVRCreate, db: AsyncSession 
     await db.commit()
     result = await db.execute(select(IVR).options(selectinload(IVR.options)).where(IVR.id == ivr.id))
     return _ivr_out(result.scalar_one())
+
+
+@router.put("/{ivr_id}", response_model=IVROut)
+async def update_ivr(ivr_id: uuid.UUID, payload: IVRUpdate, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    result = await db.execute(select(IVR).options(selectinload(IVR.options)).where(IVR.id == ivr_id))
+    ivr = result.scalar_one_or_none()
+    if not ivr:
+        raise HTTPException(status_code=404, detail="IVR introuvable")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(ivr, k, v)
+    db.add(PendingChange(tenant_id=ivr.tenant_id, change_type="update_ivr", entity_type="ivr",
+                         entity_id=str(ivr_id), payload=payload.model_dump(exclude_unset=True, mode="json"), created_by=user.email))
+    await db.commit()
+    await db.refresh(ivr)
+    return _ivr_out(ivr)
 
 
 @router.delete("/{ivr_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -293,6 +322,28 @@ class RingGroupMemberUpdate(BaseModel):
     temporarily_excluded: bool | None = None
 
 
+FAILOVER_DEST_TYPES = {"extension": "Extension", "ivr": "IVR", "queue": "File d'attente", "voicemail": "Messagerie", "hangup": "Raccrocher"}
+
+class RingGroupFailoverStepOut(BaseModel):
+    id: uuid.UUID
+    step_order: int
+    destination_type: str
+    destination: str
+    ring_seconds: int | None
+
+class RingGroupFailoverStepCreate(BaseModel):
+    step_order: int | None = None
+    destination_type: str
+    destination: str
+    ring_seconds: int | None = None
+
+class RingGroupFailoverStepUpdate(BaseModel):
+    step_order: int | None = None
+    destination_type: str | None = None
+    destination: str | None = None
+    ring_seconds: int | None = None
+
+
 class RingGroupOut(BaseModel):
     id: uuid.UUID
     tenant_id: uuid.UUID
@@ -301,12 +352,13 @@ class RingGroupOut(BaseModel):
     ring_strategy: str
     ring_time: int
     members: list[str]  # legacy CSV -- voir ring_members pour la donnee structuree (TASK-023.9)
-    no_answer_destination: str | None
+    no_answer_destination: str | None  # ⚠️ LEGACY (TASK-S051) -- remplace par failover_steps, plus lu par le dialplan
     is_active: bool
     created_at: datetime
     confirm_before_answer: bool
     schedule_id: uuid.UUID | None
     ring_members: list[RingGroupMemberOut] = []
+    failover_steps: list[RingGroupFailoverStepOut] = []
 
 class RingGroupCreate(BaseModel):
     name: str
@@ -342,13 +394,18 @@ def _rg_out(r: RingGroup) -> RingGroupOut:
                 priority=m.priority, ring_order=m.ring_order, temporarily_excluded=m.temporarily_excluded,
             ) for m in (r.ring_members or [])
         ],
+        failover_steps=[
+            RingGroupFailoverStepOut(id=s.id, step_order=s.step_order, destination_type=s.destination_type,
+                                     destination=s.destination, ring_seconds=s.ring_seconds)
+            for s in (r.failover_steps or [])
+        ],
     )
 
 
 @router.get("/ring-groups/tenant/{tenant_id}", response_model=list[RingGroupOut])
 async def list_ring_groups(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(
-        select(RingGroup).options(selectinload(RingGroup.ring_members).selectinload(RingGroupMember.extension))
+        select(RingGroup).options(selectinload(RingGroup.ring_members).selectinload(RingGroupMember.extension), selectinload(RingGroup.failover_steps))
         .where(RingGroup.tenant_id == tenant_id).order_by(RingGroup.extension)
     )
     return [_rg_out(r) for r in result.scalars().all()]
@@ -357,7 +414,7 @@ async def list_ring_groups(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_
 @router.put("/ring-groups/{rg_id}", response_model=RingGroupOut)
 async def update_ring_group(rg_id: uuid.UUID, payload: RingGroupUpdate, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(
-        select(RingGroup).options(selectinload(RingGroup.ring_members).selectinload(RingGroupMember.extension))
+        select(RingGroup).options(selectinload(RingGroup.ring_members).selectinload(RingGroupMember.extension), selectinload(RingGroup.failover_steps))
         .where(RingGroup.id == rg_id)
     )
     rg = result.scalar_one_or_none()
@@ -420,6 +477,71 @@ async def remove_ring_group_member(member_id: uuid.UUID, db: AsyncSession = Depe
     await db.commit()
 
 
+# ── Ring Group Failover Steps (TASK-S051) ──────────────────────────────────────
+# Chaine illimitee de destinations essayees en sequence si le groupe d'appel ne
+# repond pas -- remplace RingGroup.no_answer_destination (jamais reellement
+# cable dans le dialplan).
+
+def _step_out(s: RingGroupFailoverStep) -> RingGroupFailoverStepOut:
+    return RingGroupFailoverStepOut(id=s.id, step_order=s.step_order, destination_type=s.destination_type,
+                                    destination=s.destination, ring_seconds=s.ring_seconds)
+
+
+@router.post("/ring-groups/{rg_id}/failover-steps", response_model=RingGroupFailoverStepOut, status_code=status.HTTP_201_CREATED)
+async def add_failover_step(rg_id: uuid.UUID, payload: RingGroupFailoverStepCreate, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
+    rg = await db.get(RingGroup, rg_id)
+    if not rg:
+        raise HTTPException(status_code=404, detail="Groupe d'appels introuvable")
+    if payload.destination_type not in FAILOVER_DEST_TYPES:
+        raise HTTPException(status_code=400, detail="Type de destination invalide")
+    step_order = payload.step_order
+    if step_order is None:
+        result = await db.execute(select(RingGroupFailoverStep).where(RingGroupFailoverStep.ring_group_id == rg_id))
+        existing = result.scalars().all()
+        step_order = (max((s.step_order for s in existing), default=-1)) + 1
+    s = RingGroupFailoverStep(ring_group_id=rg_id, step_order=step_order,
+                              destination_type=payload.destination_type, destination=payload.destination,
+                              ring_seconds=payload.ring_seconds)
+    db.add(s)
+    db.add(PendingChange(tenant_id=rg.tenant_id, change_type="add_ring_group_failover_step", entity_type="ring_group",
+                         entity_id=str(rg_id), payload={"destination_type": payload.destination_type, "destination": payload.destination}, created_by=user.email if user else "erpcrm-proxy"))
+    await db.commit()
+    await db.refresh(s)
+    return _step_out(s)
+
+
+@router.put("/ring-groups/failover-steps/{step_id}", response_model=RingGroupFailoverStepOut)
+async def update_failover_step(step_id: uuid.UUID, payload: RingGroupFailoverStepUpdate, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
+    result = await db.execute(select(RingGroupFailoverStep).where(RingGroupFailoverStep.id == step_id))
+    s = result.scalar_one_or_none()
+    if not s:
+        raise HTTPException(status_code=404, detail="Étape introuvable")
+    data = payload.model_dump(exclude_unset=True)
+    if "destination_type" in data and data["destination_type"] not in FAILOVER_DEST_TYPES:
+        raise HTTPException(status_code=400, detail="Type de destination invalide")
+    for k, v in data.items():
+        setattr(s, k, v)
+    rg = await db.get(RingGroup, s.ring_group_id)
+    db.add(PendingChange(tenant_id=rg.tenant_id, change_type="update_ring_group_failover_step", entity_type="ring_group",
+                         entity_id=str(s.ring_group_id), payload=data, created_by=user.email if user else "erpcrm-proxy"))
+    await db.commit()
+    await db.refresh(s)
+    return _step_out(s)
+
+
+@router.delete("/ring-groups/failover-steps/{step_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_failover_step(step_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
+    result = await db.execute(select(RingGroupFailoverStep).where(RingGroupFailoverStep.id == step_id))
+    s = result.scalar_one_or_none()
+    if not s:
+        raise HTTPException(status_code=404, detail="Étape introuvable")
+    rg = await db.get(RingGroup, s.ring_group_id)
+    db.add(PendingChange(tenant_id=rg.tenant_id, change_type="remove_ring_group_failover_step", entity_type="ring_group",
+                         entity_id=str(s.ring_group_id), payload={"step_id": str(step_id)}, created_by=user.email if user else "erpcrm-proxy"))
+    await db.delete(s)
+    await db.commit()
+
+
 @router.post("/ring-groups/tenant/{tenant_id}", response_model=RingGroupOut, status_code=status.HTTP_201_CREATED)
 async def create_ring_group(tenant_id: uuid.UUID, payload: RingGroupCreate, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
     rg = RingGroup(tenant_id=tenant_id, name=payload.name, extension=payload.extension,
@@ -431,7 +553,7 @@ async def create_ring_group(tenant_id: uuid.UUID, payload: RingGroupCreate, db: 
                          entity_id=str(rg.id), payload={"extension": payload.extension, "members": payload.members}, created_by=user.email if user else "erpcrm-proxy"))
     await db.commit()
     result = await db.execute(
-        select(RingGroup).options(selectinload(RingGroup.ring_members).selectinload(RingGroupMember.extension))
+        select(RingGroup).options(selectinload(RingGroup.ring_members).selectinload(RingGroupMember.extension), selectinload(RingGroup.failover_steps))
         .where(RingGroup.id == rg.id)
     )
     return _rg_out(result.scalar_one())

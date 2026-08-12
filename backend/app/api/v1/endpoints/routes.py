@@ -12,7 +12,11 @@ from app.models.user import User
 
 router = APIRouter()
 
-DEST_TYPES = {"extension": "Extension", "ivr": "IVR", "queue": "File d'attente", "voicemail": "Messagerie", "hangup": "Raccrocher"}
+DEST_TYPES = {
+    "extension": "Extension", "ivr": "IVR", "queue": "File d'attente", "voicemail": "Messagerie",
+    "hangup": "Raccrocher", "fax": "Fax virtuel", "conference": "Conférence",
+    "transfer": "Transfert d'appel", "message": "Message enregistré",
+}
 
 
 # ── Outbound Routes ───────────────────────────────────────────────────────────
@@ -114,6 +118,8 @@ class InboundRouteOut(BaseModel):
     destination_type: str
     destination_type_label: str
     destination: str
+    after_message_destination_type: str | None
+    after_message_destination: str | None
     is_active: bool
     created_at: datetime
 
@@ -123,11 +129,15 @@ class InboundRouteCreate(BaseModel):
     name: str
     destination_type: str = "extension"
     destination: str
+    after_message_destination_type: str | None = None
+    after_message_destination: str | None = None
 
 class InboundRouteUpdate(BaseModel):
     name: str | None = None
     destination_type: str | None = None
     destination: str | None = None
+    after_message_destination_type: str | None = None
+    after_message_destination: str | None = None
     is_active: bool | None = None
 
 
@@ -135,7 +145,10 @@ def _in_route(r: InboundRoute) -> InboundRouteOut:
     return InboundRouteOut(
         id=r.id, tenant_id=r.tenant_id, did_id=r.did_id, did_number=r.did_number, name=r.name,
         destination_type=r.destination_type, destination_type_label=DEST_TYPES.get(r.destination_type, r.destination_type),
-        destination=r.destination, is_active=r.is_active, created_at=r.created_at,
+        destination=r.destination,
+        after_message_destination_type=r.after_message_destination_type,
+        after_message_destination=r.after_message_destination,
+        is_active=r.is_active, created_at=r.created_at,
     )
 
 

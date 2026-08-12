@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 from app.core.database import get_db
-from app.api.v1.endpoints.auth import get_current_user
+from app.api.v1.endpoints.auth import get_current_user_or_service
 from app.models.schedule import Schedule, ScheduleRule, Holiday
 from app.models.user import User
 
@@ -20,6 +20,8 @@ class RuleOut(BaseModel):
     open_time: str
     close_time: str
     label: str | None
+    destination_type: str | None
+    destination: str | None
 
 class ScheduleOut(BaseModel):
     id: uuid.UUID
@@ -36,6 +38,16 @@ class RuleCreate(BaseModel):
     open_time: str            # "09:00"
     close_time: str           # "17:00"
     label: str | None = None
+    destination_type: str | None = None
+    destination: str | None = None
+
+class RuleUpdate(BaseModel):
+    days_of_week: list[int] | None = None
+    open_time: str | None = None
+    close_time: str | None = None
+    label: str | None = None
+    destination_type: str | None = None
+    destination: str | None = None
 
 class ScheduleCreate(BaseModel):
     name: str
@@ -54,7 +66,8 @@ class ScheduleUpdate(BaseModel):
 
 def _rule_out(r: ScheduleRule) -> RuleOut:
     return RuleOut(id=r.id, days_of_week=[int(d) for d in r.days_of_week.split(",") if d],
-                   open_time=str(r.open_time)[:5], close_time=str(r.close_time)[:5], label=r.label)
+                   open_time=str(r.open_time)[:5], close_time=str(r.close_time)[:5], label=r.label,
+                   destination_type=r.destination_type, destination=r.destination)
 
 def _sched_out(s: Schedule, rules: list[ScheduleRule] = []) -> ScheduleOut:
     return ScheduleOut(id=s.id, tenant_id=s.tenant_id, name=s.name, timezone=s.timezone,
@@ -64,7 +77,7 @@ def _sched_out(s: Schedule, rules: list[ScheduleRule] = []) -> ScheduleOut:
 
 
 @router.get("/tenant/{tenant_id}", response_model=list[ScheduleOut])
-async def list_schedules(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def list_schedules(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     scheds = await db.execute(select(Schedule).where(Schedule.tenant_id == tenant_id).order_by(Schedule.name))
     result = []
     for s in scheds.scalars().all():
@@ -74,7 +87,7 @@ async def list_schedules(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db
 
 
 @router.post("/tenant/{tenant_id}", response_model=ScheduleOut, status_code=status.HTTP_201_CREATED)
-async def create_schedule(tenant_id: uuid.UUID, payload: ScheduleCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def create_schedule(tenant_id: uuid.UUID, payload: ScheduleCreate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     s = Schedule(tenant_id=tenant_id, name=payload.name, timezone=payload.timezone,
                  closed_destination_type=payload.closed_destination_type,
                  closed_destination=payload.closed_destination)
@@ -84,7 +97,8 @@ async def create_schedule(tenant_id: uuid.UUID, payload: ScheduleCreate, db: Asy
     for r in payload.rules:
         rule = ScheduleRule(schedule_id=s.id, days_of_week=",".join(str(d) for d in r.days_of_week),
                             open_time=dt.time.fromisoformat(r.open_time),
-                            close_time=dt.time.fromisoformat(r.close_time), label=r.label)
+                            close_time=dt.time.fromisoformat(r.close_time), label=r.label,
+                            destination_type=r.destination_type, destination=r.destination)
         db.add(rule)
         rules.append(rule)
     await db.commit()
@@ -93,7 +107,7 @@ async def create_schedule(tenant_id: uuid.UUID, payload: ScheduleCreate, db: Asy
 
 
 @router.put("/{sched_id}", response_model=ScheduleOut)
-async def update_schedule(sched_id: uuid.UUID, payload: ScheduleUpdate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def update_schedule(sched_id: uuid.UUID, payload: ScheduleUpdate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(Schedule).where(Schedule.id == sched_id))
     s = result.scalar_one_or_none()
     if not s:
@@ -107,7 +121,7 @@ async def update_schedule(sched_id: uuid.UUID, payload: ScheduleUpdate, db: Asyn
 
 
 @router.delete("/{sched_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_schedule(sched_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def delete_schedule(sched_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(Schedule).where(Schedule.id == sched_id))
     s = result.scalar_one_or_none()
     if not s:
@@ -117,18 +131,39 @@ async def delete_schedule(sched_id: uuid.UUID, db: AsyncSession = Depends(get_db
 
 
 @router.post("/{sched_id}/rules", response_model=RuleOut, status_code=status.HTTP_201_CREATED)
-async def add_rule(sched_id: uuid.UUID, payload: RuleCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def add_rule(sched_id: uuid.UUID, payload: RuleCreate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     rule = ScheduleRule(schedule_id=sched_id, days_of_week=",".join(str(d) for d in payload.days_of_week),
                         open_time=dt.time.fromisoformat(payload.open_time),
-                        close_time=dt.time.fromisoformat(payload.close_time), label=payload.label)
+                        close_time=dt.time.fromisoformat(payload.close_time), label=payload.label,
+                        destination_type=payload.destination_type, destination=payload.destination)
     db.add(rule)
     await db.commit()
     await db.refresh(rule)
     return _rule_out(rule)
 
 
+@router.put("/rules/{rule_id}", response_model=RuleOut)
+async def update_rule(rule_id: uuid.UUID, payload: RuleUpdate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    result = await db.execute(select(ScheduleRule).where(ScheduleRule.id == rule_id))
+    r = result.scalar_one_or_none()
+    if not r:
+        raise HTTPException(status_code=404, detail="Règle introuvable")
+    data = payload.model_dump(exclude_unset=True)
+    if "days_of_week" in data:
+        r.days_of_week = ",".join(str(d) for d in data.pop("days_of_week"))
+    if "open_time" in data:
+        r.open_time = dt.time.fromisoformat(data.pop("open_time"))
+    if "close_time" in data:
+        r.close_time = dt.time.fromisoformat(data.pop("close_time"))
+    for k, v in data.items():
+        setattr(r, k, v)
+    await db.commit()
+    await db.refresh(r)
+    return _rule_out(r)
+
+
 @router.delete("/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_rule(rule_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def delete_rule(rule_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(ScheduleRule).where(ScheduleRule.id == rule_id))
     r = result.scalar_one_or_none()
     if not r:
@@ -157,7 +192,7 @@ class HolidayCreate(BaseModel):
 
 
 @router.get("/holidays/tenant/{tenant_id}", response_model=list[HolidayOut])
-async def list_holidays(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def list_holidays(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(Holiday).where(Holiday.tenant_id == tenant_id).order_by(Holiday.date))
     return [HolidayOut(id=h.id, tenant_id=h.tenant_id, date=h.date, name=h.name,
                        override_destination_type=h.override_destination_type,
@@ -166,7 +201,7 @@ async def list_holidays(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db)
 
 
 @router.post("/holidays/tenant/{tenant_id}", response_model=HolidayOut, status_code=status.HTTP_201_CREATED)
-async def create_holiday(tenant_id: uuid.UUID, payload: HolidayCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def create_holiday(tenant_id: uuid.UUID, payload: HolidayCreate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     h = Holiday(tenant_id=tenant_id, **payload.model_dump())
     db.add(h)
     await db.commit()
@@ -177,7 +212,7 @@ async def create_holiday(tenant_id: uuid.UUID, payload: HolidayCreate, db: Async
 
 
 @router.delete("/holidays/{holiday_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_holiday(holiday_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def delete_holiday(holiday_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(Holiday).where(Holiday.id == holiday_id))
     h = result.scalar_one_or_none()
     if not h:
@@ -187,7 +222,7 @@ async def delete_holiday(holiday_id: uuid.UUID, db: AsyncSession = Depends(get_d
 
 
 @router.get("/{sched_id}/is-open", response_model=dict)
-async def check_is_open(sched_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def check_is_open(sched_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     """Check if schedule is currently open. Returns {is_open, reason}."""
     import zoneinfo
     result = await db.execute(select(Schedule).where(Schedule.id == sched_id))
@@ -221,7 +256,8 @@ async def check_is_open(sched_id: uuid.UUID, db: AsyncSession = Depends(get_db),
     for r in rules.scalars().all():
         days = [int(d) for d in r.days_of_week.split(",") if d]
         if weekday in days and r.open_time <= now_time < r.close_time:
-            return {"is_open": True, "reason": "within_hours", "rule_label": r.label}
+            return {"is_open": True, "reason": "within_hours", "rule_label": r.label,
+                    "destination_type": r.destination_type, "destination": r.destination}
 
     return {"is_open": False, "reason": "outside_hours",
             "closed_destination_type": s.closed_destination_type,

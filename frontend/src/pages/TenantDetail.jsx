@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import api from '../services/api'
 
-const TABS = ['Extensions', 'Trunks', 'DIDs', 'Changes']
+const TABS = ['Extensions', 'Trunks', 'DIDs', 'Phrases', 'Changes']
 
 export default function TenantDetail() {
   const { id } = useParams()
@@ -12,23 +12,28 @@ export default function TenantDetail() {
   const [trunks, setTrunks] = useState([])
   const [dids, setDids] = useState([])
   const [changes, setChanges] = useState([])
+  const [prompts, setPrompts] = useState([])
+  const [promptForm, setPromptForm] = useState({ name: '', file: null })
+  const [promptUploading, setPromptUploading] = useState(false)
   const [showExtModal, setShowExtModal] = useState(false)
   const [extForm, setExtForm] = useState({ extension: '', name: '', voicemail_email: '' })
   const [confirmDeleteExt, setConfirmDeleteExt] = useState(null)
 
   const load = async () => {
-    const [t, e, tr, d, ch] = await Promise.all([
+    const [t, e, tr, d, ch, p] = await Promise.all([
       api.get(`/tenants/${id}`),
       api.get(`/extensions/tenant/${id}`),
       api.get(`/trunks/tenant/${id}`),
       api.get(`/dids/tenant/${id}`),
       api.get(`/changes/pending/${id}`),
+      api.get(`/prompts/tenant/${id}`),
     ])
     setTenant(t.data)
     setExtensions(e.data)
     setTrunks(tr.data)
     setDids(d.data)
     setChanges(ch.data)
+    setPrompts(p.data)
   }
 
   useEffect(() => { load() }, [id])
@@ -57,6 +62,39 @@ export default function TenantDetail() {
     await api.delete(`/extensions/${confirmDeleteExt.id}`)
     setConfirmDeleteExt(null)
     load()
+  }
+
+  const uploadPrompt = async e => {
+    e.preventDefault()
+    if (!promptForm.name || !promptForm.file) return
+    setPromptUploading(true)
+    try {
+      const fd = new FormData()
+      fd.append('name', promptForm.name)
+      fd.append('file', promptForm.file)
+      await api.post(`/prompts/tenant/${id}`, fd)
+      setPromptForm({ name: '', file: null })
+      load()
+    } catch (err) {
+      alert(err.response?.data?.detail || 'Échec de l\'upload')
+    } finally {
+      setPromptUploading(false)
+    }
+  }
+
+  const togglePromptActive = async p => {
+    await api.put(`/prompts/${p.id}`, { is_active: !p.is_active })
+    load()
+  }
+
+  const deletePrompt = async p => {
+    if (!confirm(`Supprimer la phrase « ${p.name} » ?`)) return
+    try {
+      await api.delete(`/prompts/${p.id}`)
+      load()
+    } catch (err) {
+      alert(err.response?.data?.detail || 'Suppression impossible')
+    }
   }
 
   if (!tenant) return <div>Chargement...</div>
@@ -144,6 +182,44 @@ export default function TenantDetail() {
             ))}
           </tbody>
         </table>
+      )}
+
+      {tab === 'Phrases' && (
+        <div>
+          <p style={{ fontSize: '.85rem', color: '#6B7280', marginTop: 0 }}>
+            Enregistrements réutilisables — attribuables comme accueil d'un IVR ou comme
+            destination "Message enregistré" d'un DID (raccroche automatiquement après
+            lecture, sauf si une 2e destination est ajoutée sur le DID).
+          </p>
+          <form onSubmit={uploadPrompt} style={{ display: 'flex', gap: '.5rem', alignItems: 'center', marginBottom: '1rem' }}>
+            <input placeholder="Nom de la phrase" value={promptForm.name}
+              onChange={e => setPromptForm({ ...promptForm, name: e.target.value })} required />
+            <input type="file" accept="audio/*"
+              onChange={e => setPromptForm({ ...promptForm, file: e.target.files[0] })} required />
+            <button type="submit" className="btn btn-primary btn-sm" disabled={promptUploading}>
+              {promptUploading ? 'Envoi…' : '+ Téléverser'}
+            </button>
+          </form>
+          <table>
+            <thead><tr><th>Nom</th><th>Durée</th><th>Statut</th><th></th></tr></thead>
+            <tbody>
+              {prompts.map(p => (
+                <tr key={p.id}>
+                  <td>{p.name}</td>
+                  <td>{p.duration_seconds != null ? `${p.duration_seconds}s` : '—'}</td>
+                  <td>
+                    <span className={`badge ${p.is_active ? 'badge-green' : 'badge-gray'}`}
+                      style={{ cursor: 'pointer' }} onClick={() => togglePromptActive(p)}>
+                      {p.is_active ? 'Actif' : 'Inactif'}
+                    </span>
+                  </td>
+                  <td><button className="btn btn-danger btn-sm" onClick={() => deletePrompt(p)}>Suppr.</button></td>
+                </tr>
+              ))}
+              {prompts.length === 0 && <tr><td colSpan={4} style={{ color: '#9CA3AF' }}>Aucune phrase.</td></tr>}
+            </tbody>
+          </table>
+        </div>
       )}
 
       {tab === 'Changes' && (

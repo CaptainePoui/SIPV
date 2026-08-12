@@ -45,3 +45,8 @@ class InboundRoute(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     asterisk_synced: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # TASK-S047 -- voir TenantDID.after_message_destination_type (meme convention,
+    # copie ici par _sync_inbound_route_from_did() car c'est CETTE table que
+    # _dialplan_public() lit reellement pour router les appels entrants).
+    after_message_destination_type: Mapped[str | None] = mapped_column(String(20))
+    after_message_destination: Mapped[str | None] = mapped_column(String(100))

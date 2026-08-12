@@ -8,14 +8,15 @@ from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.config import settings
 from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
-from app.models.provisioning import PhoneModel, ProvisionedPhone, PhoneButton, PhoneButtonTemplate, PhoneButtonTemplateItem
+from app.models.provisioning import PhoneModel, ProvisionedPhone, PhoneButton, PhoneButtonTemplate, PhoneButtonTemplateItem, GlobalTemplate, TenantTemplate, TenantModelTemplate
 from app.models.sip import SIPExtension
+from app.models.tenant import Tenant
 from app.models.user import User
 
 router = APIRouter()
@@ -128,6 +129,8 @@ class PhoneOut(BaseModel):
     bluetooth_enabled: bool
     headset_used: bool
     expansion_module: str | None
+    provisioning_protocol: str
+    selected_tenant_model_template_ids: list[uuid.UUID] = []  # TASK-S044.2
     # Calcule a la volee depuis last_provisioned, pas stocke (TASK-S011.2) -- "jamais" ou
     # "provisionne" (avec la date deja dans last_provisioned). Pas de palier "en retard" :
     # aucun seuil precis n'a ete demande, on n'en invente pas un arbitraire.
@@ -150,6 +153,7 @@ class PhoneCreate(BaseModel):
     bluetooth_enabled: bool = False
     headset_used: bool = False
     expansion_module: str | None = None
+    provisioning_protocol: str = "https"
 
 class PhoneUpdate(BaseModel):
     extension_id: uuid.UUID | None = None
@@ -167,7 +171,9 @@ class PhoneUpdate(BaseModel):
     bluetooth_enabled: bool | None = None
     headset_used: bool | None = None
     expansion_module: str | None = None
+    provisioning_protocol: str | None = None
     mac_address: str | None = None  # remplacement d'appareil physique : seul le MAC/SN change
+    selected_tenant_model_template_ids: list[uuid.UUID] | None = None  # TASK-S044.2
 
 
 def _phone_out(p: ProvisionedPhone, reveal: bool = False) -> PhoneOut:
@@ -181,6 +187,8 @@ def _phone_out(p: ProvisionedPhone, reveal: bool = False) -> PhoneOut:
         has_admin_password=bool(p.encrypted_admin_password),
         wifi_enabled=p.wifi_enabled, bluetooth_enabled=p.bluetooth_enabled,
         headset_used=p.headset_used, expansion_module=p.expansion_module,
+        provisioning_protocol=p.provisioning_protocol,
+        selected_tenant_model_template_ids=p.selected_tenant_model_template_ids or [],
         provisioning_status="provisionne" if p.last_provisioned else "jamais",
     )
     if reveal:
@@ -263,11 +271,35 @@ async def delete_phone(phone_id: uuid.UUID, db: AsyncSession = Depends(get_db), 
     await db.commit()
 
 
+# Defauts systeme du catalogue d'options telephonie (TASK-S011.5) -- utilises quand
+# ni la compagnie (Tenant.phone_option_defaults) ni le poste (ProvisionedPhone.extra_config)
+# ne precisent une valeur. Catalogue volontairement minimal (GXP2135 seulement pour
+# l'instant) -- voir ref_data.py cote ERPCRM pour la liste affichee a l'utilisateur.
+PHONE_OPTION_SYSTEM_DEFAULTS = {
+    "language": "auto",
+}
+
+# Mode de touche programmable Grandstream pour le bloc P238xx -- legende confirmee
+# empiriquement contre un fichier ScopServ reellement fonctionnel (11=BLF, 10=Speed
+# Dial), qui ne correspond PAS a la legende "Dynamic VPK" (0-26) imprimee a cote de
+# ce champ dans la doc officielle Grandstream mais a la legende "Fixed VPK" (-1-36) --
+# la doc semble mal etiquetee pour les VPK au-dela du 6e. On suit le fichier reel.
+BUTTON_TYPE_TO_GS_MODE = {
+    "line": 0, "blf": 11, "speed_dial": 10, "park": 19, "park_retrieve": 26,
+    "voicemail": 16, "transfer": 18, "intercom": 20, "paging": 23, "dnd": 32,
+    "forward": 31, "queue": 11, "agent_login": 10, "agent_logout": 10,
+    "agent_pause": 10, "pickup_group": 10, "feature_code": 10, "door": 10,
+    "directory": 29,
+}
+
+
 @router.get("/{phone_id}/config", response_class=PlainTextResponse)
 async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     """Returns rendered provisioning config for the phone. No auth — phones fetch this directly."""
     result = await db.execute(
-        select(ProvisionedPhone).where(ProvisionedPhone.id == phone_id)
+        select(ProvisionedPhone)
+        .options(selectinload(ProvisionedPhone.buttons))
+        .where(ProvisionedPhone.id == phone_id)
     )
     phone = result.scalar_one_or_none()
     if not phone or not phone.is_active:
@@ -284,17 +316,83 @@ async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_d
         raise HTTPException(status_code=404, detail="Aucun template de config pour ce modèle")
 
     ext = None
+    tenant = None
+    server = None
     if phone.extension_id:
-        e = await db.execute(select(SIPExtension).where(SIPExtension.id == phone.extension_id))
+        e = await db.execute(
+            select(SIPExtension)
+            .options(selectinload(SIPExtension.tenant).selectinload(Tenant.server))
+            .where(SIPExtension.id == phone.extension_id)
+        )
         ext = e.scalar_one_or_none()
+        if ext:
+            tenant = ext.tenant
+            server = tenant.server if tenant else None
+
+    # Fusion du catalogue d'options -- chaine d'heritage a 5 niveaux (TASK-S044/
+    # S044.1/S044.2) : systeme -> template(s) global(aux) serveur (celui
+    # is_default automatique + ceux choisis explicitement en plus, ex. "defaut"
+    # + "oreillette" + "boutons de park") -> Global Policy tenant
+    # (phone_option_defaults) -> template(s) du tenant CHOISIS explicitement ->
+    # template(s) du modele CHOISIS explicitement -> poste individuel. Le plus
+    # specifique gagne ; PLUSIEURS templates possibles au meme niveau, fusionnes
+    # dans l'ordre du tableau (le dernier du tableau gagne en cas de cle en
+    # commun entre 2 templates du meme niveau). Contrairement au is_default
+    # serveur (automatique, "policy"), tenant/modele ne s'appliquent QUE si
+    # explicitement choisis -- pas de devinette.
+    options = dict(PHONE_OPTION_SYSTEM_DEFAULTS)
+
+    if server:
+        gt = await db.execute(
+            select(GlobalTemplate).where(
+                GlobalTemplate.server_id == server.id,
+                GlobalTemplate.is_default == True,
+                GlobalTemplate.is_active == True,
+            )
+        )
+        global_template = gt.scalar_one_or_none()
+        if global_template:
+            options.update(global_template.options or {})
+
+    if tenant and tenant.selected_global_template_ids:
+        for tid in tenant.selected_global_template_ids:
+            t = await db.get(GlobalTemplate, tid)
+            if t and t.is_active:
+                options.update(t.options or {})
+
+    if tenant and tenant.phone_option_defaults:
+        options.update(tenant.phone_option_defaults)
+
+    if tenant and tenant.selected_tenant_template_ids:
+        for tid in tenant.selected_tenant_template_ids:
+            t = await db.get(TenantTemplate, tid)
+            if t and t.is_active:
+                options.update(t.options or {})
+
+    if phone.selected_tenant_model_template_ids:
+        for tid in phone.selected_tenant_model_template_ids:
+            t = await db.get(TenantModelTemplate, tid)
+            if t and t.is_active:
+                options.update(t.options or {})
+
+    if phone.extra_config:
+        options.update(phone.extra_config)
 
     context: dict[str, Any] = {
         "phone": phone,
         "extension": ext,
+        # Mot de passe SIP dechiffre a part -- ext.password est stocke chiffre
+        # (Fernet, meme convention que xml_curl.py) et ne doit jamais transiter
+        # tel quel dans un template.
+        "ext_password": _decrypt(ext.password) if ext else "",
+        "tenant": tenant,
+        "server": server,
         "mac": phone.mac_address.replace(":", "").lower(),
+        "options": options,
+        "buttons": sorted(phone.buttons, key=lambda b: (b.page, b.position)),
+        "button_mode": BUTTON_TYPE_TO_GS_MODE,
+        "config_host": f"{settings.SIPV_HOST}:8020",
     }
-    if phone.extra_config:
-        context.update(phone.extra_config)
 
     try:
         env = Environment(loader=BaseLoader())
@@ -532,3 +630,82 @@ async def apply_button_template(template_id: uuid.UUID, phone_id: uuid.UUID, db:
     for b in new_buttons:
         await db.refresh(b)
     return [_button_out(b) for b in new_buttons]
+
+
+# ── Tenant-Model Templates -- chaine d'heritage a 5 niveaux (TASK-S044) ──
+# TenantTemplate a demenage dans servers.py (bibliotheque par serveur,
+# TASK-S044.1) -- reste ici seulement ce qui est cree/scope par compagnie.
+class TemplateOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    description: str | None
+    options: dict
+    is_default: bool
+    is_active: bool
+    created_at: datetime
+    model_config = {"from_attributes": True}
+
+class TenantModelTemplateOut(TemplateOut):
+    tenant_id: uuid.UUID
+    phone_model_id: uuid.UUID
+
+class TenantModelTemplateCreate(BaseModel):
+    tenant_id: uuid.UUID
+    phone_model_id: uuid.UUID
+    name: str
+    description: str | None = None
+    options: dict = {}
+    is_default: bool = False
+    is_active: bool = True
+
+class TemplateUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    options: dict | None = None
+    is_default: bool | None = None
+    is_active: bool | None = None
+
+
+
+@router.get("/tenant-model-templates/tenant/{tenant_id}", response_model=list[TenantModelTemplateOut])
+async def list_tenant_model_templates(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    result = await db.execute(select(TenantModelTemplate).where(TenantModelTemplate.tenant_id == tenant_id).order_by(TenantModelTemplate.name))
+    return result.scalars().all()
+
+
+@router.post("/tenant-model-templates", response_model=TenantModelTemplateOut, status_code=status.HTTP_201_CREATED)
+async def create_tenant_model_template(payload: TenantModelTemplateCreate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    if payload.is_default:
+        await db.execute(update(TenantModelTemplate).where(
+            TenantModelTemplate.tenant_id == payload.tenant_id, TenantModelTemplate.phone_model_id == payload.phone_model_id,
+        ).values(is_default=False))
+    t = TenantModelTemplate(**payload.model_dump())
+    db.add(t)
+    await db.commit()
+    await db.refresh(t)
+    return t
+
+
+@router.put("/tenant-model-templates/{template_id}", response_model=TenantModelTemplateOut)
+async def update_tenant_model_template(template_id: uuid.UUID, payload: TemplateUpdate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    t = await db.get(TenantModelTemplate, template_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Template introuvable")
+    if payload.is_default:
+        await db.execute(update(TenantModelTemplate).where(
+            TenantModelTemplate.tenant_id == t.tenant_id, TenantModelTemplate.phone_model_id == t.phone_model_id, TenantModelTemplate.id != t.id,
+        ).values(is_default=False))
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(t, k, v)
+    await db.commit()
+    await db.refresh(t)
+    return t
+
+
+@router.delete("/tenant-model-templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_tenant_model_template(template_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    t = await db.get(TenantModelTemplate, template_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Template introuvable")
+    await db.delete(t)
+    await db.commit()

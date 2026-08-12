@@ -2,7 +2,9 @@
 Synchronization from ERPCRM to SIPV.
 ERPCRM pushes company data (account_number, name) to create/update tenants.
 """
+import logging
 import uuid
+import httpx
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Header, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,8 +12,13 @@ from sqlalchemy import select
 from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.config import settings
+from app.core.did_route_sync import sync_inbound_route_from_did
+from app.core import erpcrm_client
 from app.models.tenant import Tenant
-from app.models.sip import SIPExtension
+from app.models.sip import SIPExtension, TenantDID
+from app.models.e911 import E911Address
+
+logger = logging.getLogger("sync")
 
 router = APIRouter()
 
@@ -73,6 +80,138 @@ async def sync_company(payload: ERPCRMCompanySync, db: AsyncSession = Depends(ge
         return SyncResult(action="updated", tenant_id=str(tenant.id), account_number=tenant.account_number, company_name=tenant.company_name)
 
     return SyncResult(action="no_change", tenant_id=str(tenant.id), account_number=tenant.account_number, company_name=tenant.company_name)
+
+
+class ERPCRMSiteSync(BaseModel):
+    erpcrm_site_id: uuid.UUID
+    tenant_id: uuid.UUID
+    label: str
+    civic_number: str
+    street_name: str
+    unit: str | None = None
+    city: str
+    province: str
+    postal_code: str
+    country: str = "CA"
+    is_active: bool = True
+
+
+class SiteSyncResult(BaseModel):
+    action: str  # created, updated
+    e911_address_id: str
+
+
+@router.post("/site", response_model=SiteSyncResult)
+async def sync_site(payload: ERPCRMSiteSync, db: AsyncSession = Depends(get_db), _: str = Depends(verify_api_key)):
+    """Cree ou met a jour la copie SIPV d'une succursale (E911Address) -- ERPCRM
+    est maitre pour company_sites, cette copie sert uniquement aux assignations
+    911 (DID911Assignment/ExtensionE911Assignment) cote SIPV. Retrouvee par
+    erpcrm_site_id, jamais par label (peut changer)."""
+    result = await db.execute(select(E911Address).where(E911Address.erpcrm_site_id == payload.erpcrm_site_id))
+    addr = result.scalar_one_or_none()
+
+    if not addr:
+        addr = E911Address(
+            tenant_id=payload.tenant_id, erpcrm_site_id=payload.erpcrm_site_id,
+            label=payload.label, civic_number=payload.civic_number, street_name=payload.street_name,
+            unit=payload.unit, city=payload.city, province=payload.province,
+            postal_code=payload.postal_code, country=payload.country, is_active=payload.is_active,
+        )
+        db.add(addr)
+        await db.commit()
+        await db.refresh(addr)
+        return SiteSyncResult(action="created", e911_address_id=str(addr.id))
+
+    addr.label = payload.label
+    addr.civic_number = payload.civic_number
+    addr.street_name = payload.street_name
+    addr.unit = payload.unit
+    addr.city = payload.city
+    addr.province = payload.province
+    addr.postal_code = payload.postal_code
+    addr.country = payload.country
+    addr.is_active = payload.is_active
+    addr.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    return SiteSyncResult(action="updated", e911_address_id=str(addr.id))
+
+
+class ERPCRMDidSync(BaseModel):
+    erpcrm_did_id: uuid.UUID
+    tenant_id: uuid.UUID
+    number: str
+    label: str | None = None
+    destination_type: str | None = None
+    destination: str | None = None
+    after_message_destination_type: str | None = None
+    after_message_destination: str | None = None
+    is_active: bool = True
+    schedule_id: uuid.UUID | None = None
+
+
+class DidSyncResult(BaseModel):
+    action: str  # created, updated, adopted
+    tenant_did_id: str
+
+
+@router.post("/did", response_model=DidSyncResult)
+async def sync_did(payload: ERPCRMDidSync, db: AsyncSession = Depends(get_db), _: str = Depends(verify_api_key)):
+    """Cree ou met a jour la copie SIPV (TenantDID) d'un DID ERPCRM -- ERPCRM
+    est maitre (numero, destination, succursale via l'app), SIPV reste la
+    source reelle du routage d'appel. Retrouve par erpcrm_did_id ; si absent,
+    adopte un TenantDID existant avec le meme numero (cree via SIPV avant
+    cette synchronisation) plutot que d'echouer sur la contrainte unique."""
+    result = await db.execute(select(TenantDID).where(TenantDID.erpcrm_did_id == payload.erpcrm_did_id))
+    did = result.scalar_one_or_none()
+    action = "updated"
+
+    if not did:
+        result = await db.execute(select(TenantDID).where(TenantDID.number == payload.number))
+        did = result.scalar_one_or_none()
+        if did:
+            action = "adopted"
+
+    dtype = payload.destination_type or "extension"
+
+    if not did:
+        did = TenantDID(
+            tenant_id=payload.tenant_id, erpcrm_did_id=payload.erpcrm_did_id, number=payload.number,
+            label=payload.label, destination_type=dtype, destination=payload.destination,
+            after_message_destination_type=payload.after_message_destination_type,
+            after_message_destination=payload.after_message_destination,
+            is_active=payload.is_active, schedule_id=payload.schedule_id,
+        )
+        db.add(did)
+        await db.flush()
+        await sync_inbound_route_from_did(did, db)
+        await db.commit()
+        await db.refresh(did)
+        # TASK-021/S032 : notifie ERPCRM pour la facturation recurrente -- seulement
+        # a la vraie creation (pas update/adopted), best-effort, ne bloque jamais
+        # le sync. C'est ICI que les DID sont reellement crees en pratique (ERPCRM
+        # est maitre, /did est le chemin normal -- dids.py::create_did existe mais
+        # est le chemin natif SIPV, rarement utilise pour de vrais DID).
+        try:
+            await erpcrm_client.send_billing_event(
+                tenant_id=str(did.tenant_id), action="did_added", service_type="did",
+                service_ref=str(did.id), description=f"DID {did.number}" + (f" — {did.label}" if did.label else ""),
+            )
+        except httpx.HTTPError as e:
+            logger.warning("Notification facturation ERPCRM echouee pour DID %s: %s", did.id, e)
+        return DidSyncResult(action="created", tenant_did_id=str(did.id))
+
+    did.erpcrm_did_id = payload.erpcrm_did_id
+    did.tenant_id = payload.tenant_id
+    did.label = payload.label
+    did.destination_type = dtype
+    did.destination = payload.destination
+    did.after_message_destination_type = payload.after_message_destination_type
+    did.after_message_destination = payload.after_message_destination
+    did.is_active = payload.is_active
+    did.schedule_id = payload.schedule_id
+    await sync_inbound_route_from_did(did, db)
+    await db.commit()
+    return DidSyncResult(action=action, tenant_did_id=str(did.id))
 
 
 @router.get("/status")

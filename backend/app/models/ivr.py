@@ -15,6 +15,9 @@ class IVR(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     greeting_text: Mapped[str | None] = mapped_column(Text)  # TTS or filename
+    # TASK-S046/S047 -- si renseigne, prioritaire sur greeting_text (phrase
+    # uploadee via la bibliotheque de prompts, plutot qu'un texte libre/TTS).
+    greeting_prompt_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("audio_prompts.id", ondelete="SET NULL"))
     timeout_seconds: Mapped[int] = mapped_column(Integer, default=10)
     max_retries: Mapped[int] = mapped_column(Integer, default=3)
     invalid_destination: Mapped[str | None] = mapped_column(String(100))  # where to send on invalid input
@@ -116,6 +119,36 @@ class RingGroup(Base):
     schedule_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("schedules.id", ondelete="SET NULL"))
 
     ring_members: Mapped[list["RingGroupMember"]] = relationship("RingGroupMember", back_populates="ring_group", cascade="all, delete-orphan")
+    failover_steps: Mapped[list["RingGroupFailoverStep"]] = relationship(
+        "RingGroupFailoverStep", back_populates="ring_group", cascade="all, delete-orphan",
+        order_by="RingGroupFailoverStep.step_order",
+    )
+
+
+class RingGroupFailoverStep(Base):
+    """
+    TASK-S051 (2026-08-07) : chaine de destinations de secours apres un groupe
+    d'appel sans reponse -- demande explicite de l'utilisateur ("je veux avoir la
+    possibilite d'en ajouter comme je veux"). Remplace `RingGroup.
+    no_answer_destination` (champ jamais reellement cable dans le dialplan --
+    bug trouve en meme temps que cette demande) par une liste ordonnee d'un
+    nombre illimite d'etapes, chacune essayee a son tour si la precedente
+    echoue (bridge non repondu/occupe) -- meme concept qu'un vrai serveur SIP
+    de production (chaine de renvoi/overflow).
+    """
+    __tablename__ = "ring_group_failover_steps"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    ring_group_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ring_groups.id", ondelete="CASCADE"), nullable=False)
+    step_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    destination_type: Mapped[str] = mapped_column(String(20), nullable=False)  # extension, ivr, queue, voicemail, hangup
+    destination: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Uniquement significatif pour destination_type == "extension" (combien de temps
+    # sonner cette etape avant de passer a la suivante) -- ignore pour les types
+    # "terminaux" (voicemail/ivr/hangup) qui ne "sonnent" pas.
+    ring_seconds: Mapped[int | None] = mapped_column(Integer)
+
+    ring_group: Mapped["RingGroup"] = relationship("RingGroup", back_populates="failover_steps")
 
 
 class RingGroupMember(Base):

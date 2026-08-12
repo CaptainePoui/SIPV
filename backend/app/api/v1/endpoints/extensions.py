@@ -1,7 +1,7 @@
 import logging
 import uuid
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -132,6 +132,8 @@ class ExtOut(BaseModel):
 class ExtCreate(BaseModel):
     extension: str
     name: str
+    erpcrm_contact_id: uuid.UUID | None = None  # TASK-033 -- lien direct si connu (creation depuis ERPCRM)
+    billing_effective_date: date | None = None  # TASK-033 -- date reelle de debut (portabilite) pour le prorata cote ERPCRM
     voicemail_enabled: bool = True
     voicemail_email: str | None = None
     caller_id_name: str | None = None
@@ -455,7 +457,7 @@ async def create_extension(
     payload: ExtCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User | None = Depends(get_current_user_or_service),
 ):
     tenant = await db.get(Tenant, tenant_id)
     if not tenant:
@@ -468,13 +470,13 @@ async def create_extension(
     ext = SIPExtension(
         tenant_id=tenant_id, username=username, password=encrypt(password),
         ld_pin=encrypt(payload.ld_pin) if payload.ld_pin else None,
-        **payload.model_dump(exclude={"password", "ld_pin"}),
+        **payload.model_dump(exclude={"password", "ld_pin", "erpcrm_contact_id", "billing_effective_date"}),
     )
     db.add(ext)
     change = PendingChange(
         tenant_id=tenant_id, change_type="add_extension", entity_type="extension",
         payload={"username": username, "extension": payload.extension, "name": payload.name, "password": password},
-        created_by=user.email,
+        created_by=user.email if user else "erpcrm-proxy",
     )
     db.add(change)
     await log_audit(
@@ -494,11 +496,32 @@ async def create_extension(
     await db.commit()
     await db.refresh(ext)
 
-    erpcrm_contact_id = await _link_erpcrm_contact(ext)
-    if erpcrm_contact_id:
-        ext.erpcrm_contact_id = erpcrm_contact_id
+    # TASK-033 : si ERPCRM connait deja le contact (creation initiee depuis la
+    # fiche contact), on le lie directement -- evite la recherche floue par nom
+    # de _link_erpcrm_contact ci-dessous (pensee pour l'autre sens : creation
+    # dans SIPV d'abord, sync vers ERPCRM ensuite).
+    if payload.erpcrm_contact_id:
+        ext.erpcrm_contact_id = str(payload.erpcrm_contact_id)
         await db.commit()
         await db.refresh(ext)
+    else:
+        erpcrm_contact_id = await _link_erpcrm_contact(ext)
+        if erpcrm_contact_id:
+            ext.erpcrm_contact_id = erpcrm_contact_id
+            await db.commit()
+            await db.refresh(ext)
+
+    # TASK-021/S032 : notifie ERPCRM pour la facturation recurrente -- best-effort,
+    # ne bloque jamais la creation du poste (meme pattern que _link_erpcrm_contact
+    # ci-dessus).
+    try:
+        await erpcrm_client.send_billing_event(
+            tenant_id=str(tenant_id), action="extension_added", service_type="extension",
+            service_ref=str(ext.id), description=f"Poste {ext.extension} — {ext.name}",
+            effective_date=payload.billing_effective_date.isoformat() if payload.billing_effective_date else None,
+        )
+    except httpx.HTTPError as e:
+        logger.warning("Notification facturation ERPCRM echouee pour poste %s: %s", ext.id, e)
 
     return _out(ext)
 
@@ -552,6 +575,22 @@ async def update_extension(
     )
     await db.commit()
     await db.refresh(ext)
+
+    # TASK-033 : desactiver un poste (is_active True -> False) doit retirer sa
+    # ligne de facturation recurrente (prorata credite), pas juste le rendre
+    # injoignable -- sinon le client continue d'etre facture pour un service
+    # coupe. Reactiver (False -> True) la rajoute symetriquement (prorata sur
+    # les jours restants du cycle courant, meme logique qu'une creation).
+    if "is_active" in new_data and old_data.get("is_active") != new_data.get("is_active"):
+        action = "extension_added" if new_data["is_active"] else "extension_removed"
+        try:
+            await erpcrm_client.send_billing_event(
+                tenant_id=str(ext.tenant_id), action=action, service_type="extension",
+                service_ref=str(ext.id), description=f"Poste {ext.extension} — {ext.name}",
+            )
+        except httpx.HTTPError as e:
+            logger.warning("Notification facturation ERPCRM echouee (is_active) pour poste %s: %s", ext.id, e)
+
     return _out(ext, await _groups_for(ext, db))
 
 
@@ -642,7 +681,7 @@ async def delete_extension(
     ext_id: uuid.UUID,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User | None = Depends(get_current_user_or_service),
 ):
     result = await db.execute(select(SIPExtension).where(SIPExtension.id == ext_id))
     ext = result.scalar_one_or_none()
@@ -658,7 +697,7 @@ async def delete_extension(
         tenant_id=ext.tenant_id, change_type="remove_extension", entity_type="extension",
         entity_id=str(ext_id),
         payload={"username": ext.username, "extension": ext.extension},
-        created_by=user.email,
+        created_by=user.email if user else "erpcrm-proxy",
     )
     db.add(change)
     await log_audit(
@@ -676,4 +715,92 @@ async def delete_extension(
             await erpcrm_client.update_contact(str(erpcrm_contact_id), sipv_sync=False)
         except httpx.HTTPError as e:
             logger.warning("Decochage sipv_sync ERPCRM echoue pour contact %s: %s", erpcrm_contact_id, e)
+
+    # TASK-021/S032 : notifie ERPCRM du retrait pour prorata de facturation --
+    # best-effort, la suppression du poste n'est jamais bloquee par ca.
+    try:
+        await erpcrm_client.send_billing_event(
+            tenant_id=str(ext.tenant_id), action="extension_removed", service_type="extension",
+            service_ref=str(ext.id),
+        )
+    except httpx.HTTPError as e:
+        logger.warning("Notification facturation ERPCRM echouee (retrait) pour poste %s: %s", ext.id, e)
+
+    await db.commit()
+
+
+# ── Groupes de pickup (interception *8) -- TASK-023.15.1 : entite nommee ──────
+# organisationnelle (creer un groupe vide puis y assigner des postes), le
+# dialplan continue de matcher par SIPExtension.pickup_group (string).
+from app.models.sip import PickupGroup
+
+
+class PickupGroupOut(BaseModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    name: str
+    is_active: bool
+    member_count: int
+
+
+class PickupGroupCreate(BaseModel):
+    name: str
+
+
+class PickupGroupUpdate(BaseModel):
+    name: str | None = None
+    is_active: bool | None = None
+
+
+async def _pickup_group_out(g: PickupGroup, db: AsyncSession) -> PickupGroupOut:
+    count = await db.execute(select(SIPExtension).where(SIPExtension.tenant_id == g.tenant_id, SIPExtension.pickup_group == g.name))
+    return PickupGroupOut(id=g.id, tenant_id=g.tenant_id, name=g.name, is_active=g.is_active,
+                          member_count=len(count.scalars().all()))
+
+
+@router.get("/pickup-groups/tenant/{tenant_id}", response_model=list[PickupGroupOut])
+async def list_pickup_groups(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    result = await db.execute(select(PickupGroup).where(PickupGroup.tenant_id == tenant_id).order_by(PickupGroup.name))
+    return [await _pickup_group_out(g, db) for g in result.scalars().all()]
+
+
+@router.post("/pickup-groups/tenant/{tenant_id}", response_model=PickupGroupOut, status_code=status.HTTP_201_CREATED)
+async def create_pickup_group(tenant_id: uuid.UUID, payload: PickupGroupCreate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    g = PickupGroup(tenant_id=tenant_id, name=payload.name)
+    db.add(g)
+    await db.commit()
+    await db.refresh(g)
+    return await _pickup_group_out(g, db)
+
+
+@router.put("/pickup-groups/{group_id}", response_model=PickupGroupOut)
+async def update_pickup_group(group_id: uuid.UUID, payload: PickupGroupUpdate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    result = await db.execute(select(PickupGroup).where(PickupGroup.id == group_id))
+    g = result.scalar_one_or_none()
+    if not g:
+        raise HTTPException(status_code=404, detail="Groupe de pickup introuvable")
+    data = payload.model_dump(exclude_unset=True)
+    if "name" in data and data["name"] != g.name:
+        # Renomme aussi le tag sur tous les postes membres -- le nom EST la cle
+        # de matching cote dialplan (TASK-023.15), pas de FK a suivre.
+        members = await db.execute(select(SIPExtension).where(SIPExtension.tenant_id == g.tenant_id, SIPExtension.pickup_group == g.name))
+        for ext in members.scalars().all():
+            ext.pickup_group = data["name"]
+    for k, v in data.items():
+        setattr(g, k, v)
+    await db.commit()
+    await db.refresh(g)
+    return await _pickup_group_out(g, db)
+
+
+@router.delete("/pickup-groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_pickup_group(group_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    result = await db.execute(select(PickupGroup).where(PickupGroup.id == group_id))
+    g = result.scalar_one_or_none()
+    if not g:
+        raise HTTPException(status_code=404, detail="Groupe de pickup introuvable")
+    members = await db.execute(select(SIPExtension).where(SIPExtension.tenant_id == g.tenant_id, SIPExtension.pickup_group == g.name))
+    for ext in members.scalars().all():
+        ext.pickup_group = None
+    await db.delete(g)
     await db.commit()

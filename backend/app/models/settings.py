@@ -21,3 +21,6 @@ class TelephonySettings(Base):
     voicemail_max_messages: Mapped[int] = mapped_column(Integer, default=100)
     voicemail_max_message_length: Mapped[int] = mapped_column(Integer, default=300)
     voicemail_language: Mapped[str] = mapped_column(String(5), default="fr")
+    # TASK-S023.33 -- NIP fixe pour les NOUVELLES boites vocales (Serveur, ERPCRM).
+    # Null = comportement precedent inchange (genere un NIP aleatoire 4 chiffres).
+    voicemail_default_password: Mapped[str | None] = mapped_column(String(20))

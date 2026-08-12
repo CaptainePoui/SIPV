@@ -176,5 +176,34 @@ class TenantDID(Base):
     e911_address: Mapped[str | None] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # ERPCRM est maitre pour ce DID (numero/destination/succursale, TASK-S010.5) --
+    # copie synchronisee, retrouvee/mise a jour par cet id (voir sync.py /did).
+    erpcrm_did_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), unique=True)
+    # Horaire (Time Condition, TASK-S016/S010.7) -- si renseigne, le dialplan doit
+    # utiliser schedule.is-open pour choisir entre destination (ouvert) et
+    # schedule.closed_destination (ferme), au lieu de dupliquer le DID par horaire.
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("schedules.id", ondelete="SET NULL"))
+    # TASK-S047 -- uniquement significatif quand destination_type == "message" :
+    # action apres la lecture de la phrase. Null/absent = raccrocher (comportement
+    # par defaut demande par l'utilisateur). Rempli = "Ajouter une destination"
+    # cote UI, enchaine vers une 2e destination (jamais "message" ici, pas de
+    # chainage recursif).
+    after_message_destination_type: Mapped[str | None] = mapped_column(String(20))
+    after_message_destination: Mapped[str | None] = mapped_column(String(100))
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="dids")
+
+
+class PickupGroup(Base):
+    """Groupe d'interception (*8) -- entite nommee purement organisationnelle
+    (creer/renommer/supprimer un groupe vide) ; le dialplan continue de
+    matcher par SIPExtension.pickup_group (string, TASK-023.15) pour ne pas
+    toucher a la logique ESL deja en prod -- ce nom sert juste a rendre le
+    groupe visible/gerable avant qu'un poste y soit assigne."""
+    __tablename__ = "pickup_groups"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(50), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

@@ -32,6 +32,10 @@ class ScheduleRule(Base):
     open_time: Mapped[time] = mapped_column(Time, nullable=False)       # e.g. 09:00
     close_time: Mapped[time] = mapped_column(Time, nullable=False)      # e.g. 17:00
     label: Mapped[str | None] = mapped_column(String(60))
+    # Destination propre a cette plage (ex: 8h-10h -> IVR 001, 12h-13h -> ring
+    # group cafeteria) -- meme catalogue que TenantDID.destination_type/destination.
+    destination_type: Mapped[str | None] = mapped_column(String(20))
+    destination: Mapped[str | None] = mapped_column(String(100))
 
 
 class Holiday(Base):

@@ -161,6 +161,16 @@
   "Test Un"/"Test Deux" créés automatiquement par le lien S022, maintenant rattachés à
   la compagnie Simple IP dans ERPCRM (demandé par l'utilisateur).
 
+- **Observation (2026-08-07 nuit, pendant TASK-S048)** : les logs `sipv-backend`
+  montrent un flot répété de `CDR ignore, tenant inconnu pour domaine '142.112.42.52'`
+  — un appel entrant réel arrive déjà sur le serveur depuis une IP externe (pas une IP
+  interne 192.168.x), mais le CDR est jeté car le domaine reçu (l'IP du trunk, pas un
+  `account_number` de tenant) ne matche aucun tenant. À investiguer avec l'utilisateur :
+  soit une vraie ligne SIP de production est déjà connectée et génère du trafic réel
+  perdu silencieusement (perte de CDR = perte de facturation/traçabilité), soit c'est
+  un scan/probe externe sans rapport. Pas d'action prise cette nuit (pas dans le scope
+  demandé), juste signalé pour ne pas passer à côté.
+
 ---
 
 ## Complétées
@@ -791,13 +801,725 @@ expires_at, used_at, action_type, is_used).
 | TASK-S034  | alertes        | Alertes trunk/extension down — webhook + courriel + SMS, Simple IP + client          |
 | TASK-S037  | contact erpcrm | Champs contact ERPCRM : sipv_sync, extension_number, phone_cell, phone_other         |
 | TASK-S038  | health check   | Health check ERPCRM↔SIPV + bouton sync manuelle + alerte connexion perdue            |
+| TASK-S046  | prompts        | Bibliothèque de phrases/annonces réutilisables par tenant (upload, style ScopServ)   |
+| TASK-S047  | prompts wiring | Câblage réel des phrases dans IVR (greeting) + destinations DID/route "message"      |
+| TASK-S048  | did routing fix| ⚠️ Bug critique corrigé : TenantDID n'était jamais synchronisé vers InboundRoute      |
+| TASK-S049  | cdr tenant fix | ⚠️ Bug corrigé : CDR perdus (tenant introuvable) pour les appels via trunk sortant    |
+| TASK-S050  | acl external   | Sécurité : ACL entrante sur le profil external limitée au proxy SIP du fournisseur   |
+| TASK-S051  | ring group fix | ⚠️ Bug corrigé + fonctionnalité : chaîne illimitée de destinations de secours après un groupe d'appel sans réponse |
+| TASK-S052  | audit renvois  | [~] Audit champs SIPExtension non câblés — busy/offline corrigés, call_permission/dnd_locked/queue limits en attente |
+| TASK-S054  | server sip ips | Champs config `sip_inbound_ip`/`sip_outbound_ip` sur SipvServer + édition ERPCRM (onglet Serveur) |
+| TASK-S055  | click to call  | [~] Écouter/enregistrer un fichier audio via appel réel à un poste (Mode 1 fait pour Phrases IVR ; MOH générique + Mode 2 enregistrement restent à faire) |
 
-#### TASK-S033 [ ] MOH — Music on Hold
-Fichier MOH global par défaut (upload Simple IP — s'applique à tous les tenants).
-Champ moh_file (nullable) sur Tenant — si null, fallback sur fichier global.
-Interface upload dans TenantDetail (admin SIPV).
-Référencé dans Queue.music_on_hold et dans le dialplan XML généré par mod_xml_curl.
-Fichier modifié : models/tenant.py + migration Alembic.
+#### TASK-S055 [~] Écouter/enregistrer un audio via appel à un poste (générique)
+
+Demande de l'utilisateur (2026-08-08, dictée textuellement -- voir aussi
+TASKERPCRM.md TASK-029 côté UI) : un système générique, réutilisable pour
+TOUS les enregistrements (pas juste MOH), avec deux modes distincts :
+
+**Mode 1 -- "Faire écouter" (playback seul)**
+- Bouton sur n'importe quel fichier audio existant (MOH pour commencer).
+- Popup : choisir le TENANT (filtré aux tenants actifs SIPV) -- SAUF si on est
+  déjà dans le contexte d'une compagnie précise (page fiche compagnie), auquel
+  cas ce choix est sauté.
+- Puis choisir le POSTE -- seulement les postes ACTIFS ET CONNECTÉS (enregistrés)
+  du tenant sélectionné.
+- Déclenche un appel réel vers ce poste qui joue le fichier choisi.
+
+**Mode 2 -- "Enregistrer" (phrase IVR, onglet Phrases d'une compagnie)**
+- Bouton "Enregistrer" sur l'onglet Phrases (IVR) d'une fiche compagnie.
+- Popup : choix du poste (avec nom affiché) -- PAS de choix de tenant ici,
+  déjà dans le contexte d'une compagnie donc déjà son tenant.
+- Déclenche un appel vers ce poste. Script vocal demandé EXACTEMENT :
+  1. Annonce : "quand vous aurez fini, appuyez sur # pour confirmer la fin de
+     l'enregistrement"
+  2. Enregistrement démarre, se termine sur `#`.
+  3. Menu joué : "pour écouter la phrase, appuyez sur 1 ; pour enregistrer la
+     phrase, appuyez sur 2 ; pour annuler l'enregistrement, appuyez sur 3"
+     - 1 = rejoue la phrase enregistrée, puis représente le même menu.
+     - 2 = sauvegarde définitivement la phrase (destination finale = la
+       phrase IVR ciblée sur la fiche compagnie).
+     - 3 = annule, jette l'enregistrement, raccroche.
+  4. Si aucune touche : répète le menu (1/2/3) jusqu'à 3 fois, puis annule
+     automatiquement si toujours aucune réponse (raccroche).
+
+**Reconnaissance faite pendant la session (pas encore implémenté, juste
+investigué)** :
+- `app/core/esl.py` a déjà un client ESL fonctionnel avec `originate(endpoint,
+  extension, context, caller_id_name, caller_id_number)` (bgapi, retourne un
+  Job-UUID) -- MAIS non utilisé nulle part ailleurs dans le code actuellement
+  (aucun appel à `esl.originate` trouvé hors de sa propre définition). Ce
+  serait la première vraie feature à l'utiliser.
+#### TASK-S055.1 [x] Mode 1 partiellement implémenté (Phrases IVR) + fix appel qui ne sonnait pas
+
+Le endpoint `POST /prompts/{id}/call` (mode "Faire écouter" appliqué aux
+phrases IVR, côté onglet Phrases d'une fiche compagnie) a été implémenté
+pendant la session TASK-029 (ERPCRM) sans passer par un numéro de
+sous-tâche formel ici -- noté après coup. Utilise `esl.originate_app()`
+(bgapi + syntaxe `&app(args)`, pas de passage par dialplan).
+
+Bug signalé par l'utilisateur (2026-08-10) : le poste 102 ne sonnait
+jamais. Cause : `endpoint = f"user/{ext.username}@{tenant.account_number}"`
+(ex: `user/t1001-102@t1001`) -- mais `internal.xml` force TOUS les
+enregistrements SIP dans un seul domaine `sipv`
+(`force-register-domain`/`force-subscription-domain`/
+`force-register-db-domain` = `sipv`), peu importe le tenant. Confirmé en
+testant en direct via `fs_cli` : `@t1001` → `USER_NOT_REGISTERED`,
+`@sipv` → `+OK`, appel lancé. L'unicité des postes reste garantie par le
+préfixe username (`t1001-102`), pas par le domaine SIP. Fix : endpoint
+changé pour `user/{ext.username}@sipv` dans
+`backend/app/api/v1/endpoints/prompts.py::call_prompt`.
+
+`sipv-backend` + `sipv-backend-tls` redémarrés. Mode 2 (enregistrement
+DTMF avec menu 1/2/3) toujours pas construit -- reste à faire.
+
+#### TASK-S055.2 [x] Fix .1 insuffisant -- 2e bug de syntaxe ESL (espace non protégé dans caller_id_name)
+
+Le fix du domaine (.1) était nécessaire mais pas suffisant : le bouton
+"Appeler" dans l'UI retournait 200 OK côté ERPCRM (bgapi accepte
+toujours la commande et renvoie un Job-UUID, succès ou non) mais le
+poste ne sonnait pas. Log FreeSWITCH : `[ERR] Parse Error!` →
+`Originate Resulted in Error Cause: 27 [DESTINATION_OUT_OF_ORDER]`.
+
+Cause : `esl.py::originate_app()` construit la liste de variables
+`{origination_caller_id_name=Ecoute Phrase}` -- SANS guillemets autour
+de la valeur. Le nom utilisé pour ce call ("Ecoute Phrase") contient un
+espace, ce qui casse le parseur de variables FreeSWITCH (il s'attend à
+des paires `cle=valeur` séparées par virgules, un espace non protégé
+termine la valeur prématurément). Mon test manuel via `fs_cli` avait
+utilisé `caller_id_name="Test"` (un seul mot) -- ça a caché le bug
+pendant la vérification du fix .1, d'où l'impression que "tantôt ça
+marchait" alors que seul le scénario testé (un mot) fonctionnait.
+
+Fix : guillemets simples systématiques autour de `caller_id_name`/
+`caller_id_number` dans `originate()` ET `originate_app()` (syntaxe
+FreeSWITCH standard pour échapper les valeurs à espaces/caractères
+spéciaux dans un bloc `{vars}`). Re-testé en direct avec la valeur exacte
+utilisée par le code ("Ecoute Phrase") : `+OK`, appel établi.
+
+Fichiers : `backend/app/core/esl.py`. `sipv-backend` +
+`sipv-backend-tls` redémarrés.
+
+Confirmé par l'utilisateur (2026-08-10) : le bouton "Appeler" fait
+maintenant sonner le poste et joue la phrase. Log FreeSWITCH 19:11:56
+(après le restart de 19:10:59) : ring → answered → playback → hangup
+normal, appel complet réussi depuis l'UI ERPCRM.
+
+#### TASK-S055.3 [x] 1 seconde de silence ajoutée avant la lecture (temps de porter le combiné à l'oreille)
+
+Demande de Philippe : le playback démarre immédiatement à la réponse
+(décroché = son direct), pas le temps de porter le combiné à l'oreille.
+Fix : nouvelle fonction `_copy_with_lead_silence()` dans `prompts.py` --
+lit le WAV source (PCM, format vérifié : mono/16-bit/8000Hz, compatible
+avec le module `wave` de la stdlib), préfixe 1 seconde de silence (zéros)
+au même format, écrit le résultat dans le cache
+(`prompts_cache/{prompt.id}.wav`) qui est ensuite joué par `playback()`.
+Remplace le `shutil.copy2()` direct utilisé auparavant. Générique --
+s'applique à toute phrase jouée via ce endpoint, peu importe sa durée
+d'origine.
+
+Fichiers : `backend/app/api/v1/endpoints/prompts.py`. Syntaxe vérifiée
+(`ast.parse`), `sipv-backend` + `sipv-backend-tls` redémarrés.
+
+⚠️ **Confirmé par Philippe : ce délai doit être le comportement PAR DÉFAUT
+de toute écoute d'enregistrement par appel**, pas seulement pour les
+Phrases IVR. Donc quand le Mode 1 générique (TASK-S055, "Faire écouter"
+-- MOH, et tout autre fichier audio à venir) sera construit, il doit
+réutiliser `_copy_with_lead_silence()` (déjà générique, prend n'importe
+quel WAV PCM source) plutôt que de copier le fichier directement.
+
+- `show_registrations()` / `sofia_contact(profile, user_at_domain)` déjà
+  disponibles sur le client ESL -- utilisables pour filtrer les "postes
+  actifs ET connectés" demandés dans les deux popups.
+- `api/v1/endpoints/xml_curl.py` génère déjà le dialplan XML dynamique
+  (mod_xml_curl) et utilise déjà l'app FreeSWITCH `record_session` ailleurs
+  (`_record_action`, enregistrement d'appels internes/externes) -- même
+  famille d'app FreeSWITCH à réutiliser, mais PAS le même besoin (ici il
+  faut un vrai menu interactif avec `play_and_get_digits` -- min=1 digit,
+  max=1, max tries=3, terminators vides, prompt = le menu 1/2/3, et une
+  boucle "1 = réécouter puis revenir au menu" qui nécessite soit un
+  `execute_extension` auto-référentiel, soit un script Lua/JS dédié --
+  décision d'architecture PAS encore prise, à valider avant de coder).
+
+Décisions/architecture à trancher avant de commencer (GO requis, ne pas
+commencer sans confirmation explicite -- appels réels vers de vrais
+téléphones) :
+1. Static XML dialplan (chaînage `execute_extension`) vs script Lua/JS dédié
+   pour la boucle du menu de confirmation (mode 2).
+2. Où stocker le fichier temporaire pendant l'enregistrement avant
+   confirmation (option 2 = sauvegarder), et comment le lier à la phrase
+   IVR ciblée sur la fiche compagnie ERPCRM.
+3. Nouvel endpoint SIPV (ex: `POST /api/v1/calls/listen`,
+   `POST /api/v1/calls/record-phrase`) qui origine l'appel et retourne un
+   identifiant de suivi (statut de l'appel/enregistrement) -- ERPCRM doit
+   pouvoir savoir si l'appel a été répondu / le résultat.
+4. Mode 1 générique "pour tous les enregistrements" -- MOH en premier mais
+   prévoir que ça doit aussi marcher plus tard pour d'autres types de fichiers
+   (greetings, phrases existantes, etc.) sans réécrire le mécanisme.
+
+Dépend de : rien de bloquant techniquement (ESL + xml_curl existent), mais
+travail neuf des deux côtés (SIPV dialplan/ESL + ERPCRM UI, voir TASK-029
+dans TASKERPCRM.md).
+
+#### TASK-S055.4 [x] Régression -- route `/call` + fixes .1/.3 perdus lors d'un déploiement (retrouvés et réappliqués)
+
+Pendant TASK-029.14 (TASKERPCRM.md, retrait du forçage 8kHz dans
+`prompts.py`), un rsync depuis le dépôt git local `/home/simpleip/sipv` (sur
+la machine ERPCRM) a écrasé `prompts.py` sur ce serveur avec une copie qui
+n'avait jamais reçu les ajouts de TASK-S055/S055.1/S055.3 (faits
+directement ici, jamais resynchronisés vers ce dépôt). Résultat temporaire :
+route `/call` disparue (404), puis après reconstruction depuis la doc,
+domaine SIP redevenu `@{tenant}` au lieu de `@sipv` (perte du fix .1) et
+silence de tête absent (perte du fix .3) -- 200 OK côté API mais poste muet.
+Les deux fixes ont été relus ici et réappliqués à l'identique. Reconfirmé
+par les logs FreeSWITCH réels : Ring-Ready → answered → playback →
+`NORMAL_CLEARING`.
+
+**Aucun changement de comportement voulu** -- seulement une remise en état.
+Fichiers : `backend/app/api/v1/endpoints/prompts.py`.
+Dépend de : TASK-S055, TASK-S055.1, TASK-S055.3.
+
+#### TASK-S056 [ ] Audit config centralisée -- éliminer les IPs/chemins codés en dur restants
+
+Lien TASKERPCRM : TASK-031 (détail complet côté ERPCRM). Côté SIPV,
+exemple déjà trouvé : `UPLOAD_DIR`/`PROMPT_CACHE_DIR` dans `prompts.py`
+sont des chemins absolus codés en dur, pas dans `settings`/`.env`. Pas
+commencé.
+
+#### TASK-S049 [x] Bug — CDR perdus pour les appels via trunk (résolution tenant sur sip_from_host)
+Découvert le 2026-08-07 matin en investiguant une question de l'utilisateur ("j'ai ma
+ligne test 5143222112 c'est de là que vient l'appel ?") sur les logs répétés `CDR
+ignore, tenant inconnu pour domaine '142.112.42.52'` (Aug 01 → Aug 06, en rafales
+quotidiennes). Investigation :
+- `142.112.42.52` = l'IP publique DU SERVEUR SIPV lui-même (`Ext-SIP-IP` confirmé via
+  `sofia status profile external`), PAS une IP externe suspecte — donc PAS un appel
+  fantôme/scan comme l'utilisateur le craignait au départ.
+- Le vrai trunk (ScopServ, gateway `t1001-gw-1e083163`) est bien enregistré en TLS
+  vers `vgw1.simpleip.scopcloud.com` (173.242.190.133, `REGED` confirmé) — la ligne
+  de test `15143222112` est légitime et fonctionnelle.
+- Cause réelle : `cdr.py::ingest_cdr()` résolvait le tenant via
+  `variables.get("sip_from_host") or variables.get("domain_name")` — `sip_from_host`
+  (valeur SIP brute calculée par FreeSWITCH) passait EN PREMIER, alors que
+  `domain_name` est LA valeur que notre propre dialplan fixe explicitement
+  (`set domain_name={account}`) sur chaque branche pour identifier le tenant. Pour un
+  appel acheminé via le trunk sortant, `sip_from_host` valait l'IP externe du serveur
+  (pas "t1001"), donc `sip_from_host` était toujours vrai (jamais vide) et
+  `domain_name` n'était jamais consulté → CDR perdu (silencieusement, `+OK` renvoyé
+  quand même à FreeSWITCH pour ne pas faire échouer l'appel).
+Fait : ordre de priorité inversé — `domain_name` tenté en premier, `sip_from_host` en
+filet de secours seulement.
+Testé : POST synthétique vers `/api/v1/cdr/ingest` reproduisant exactement le
+scénario du bug (`domain_name=t1001`, `sip_from_host=142.112.42.52`) → CDR créé et
+rattaché au bon tenant, confirmé en base puis nettoyé. Aucune nouvelle occurrence de
+"tenant inconnu" dans les logs depuis le déploiement du correctif.
+Fichiers : `backend/app/api/v1/endpoints/cdr.py`. Déployé sur le serveur réel,
+`sipv-backend`/`sipv-backend-tls` redémarrés.
+
+#### TASK-S050 [x] Sécurité — ACL entrante sur le profil "external" (trunks PSTN)
+Demande explicite de l'utilisateur (2026-08-07 matin) : même pratique que sur ses
+autres serveurs — n'accepter le trafic SIP entrant que depuis le proxy du
+fournisseur, pour éviter les appels fantômes d'un scan/bot. Constat avant
+correctif : le profil `external` de FreeSWITCH n'avait **aucune** ACL entrante
+(`acl.conf.xml` ne définissait que `lan` et `domains`, `external.xml` n'avait aucun
+`apply-inbound-acl`) — le port SIP du trunk était grand ouvert à n'importe quelle IP
+sur Internet.
+Fait :
+- Nouvelle liste `sipv-trunks` dans `acl.conf.xml` (`default="deny"`), avec
+  `allow cidr="173.242.190.133/32"` (IP résolue de `vgw1.simpleip.scopcloud.com` au
+  moment de l'écriture).
+- `apply-inbound-acl=sipv-trunks` ajouté au profil `external` (`sip_profiles/
+  external.xml`).
+- ⚠️ Bug rencontré en écrivant le commentaire XML du changement : un double tiret
+  ` -- ` à l'intérieur d'un commentaire XML (invalide selon la spec XML) a cassé le
+  parsing (`[error near line 85]: unclosed <!--`) au premier `reloadxml`. Corrigé
+  immédiatement (tirets remplacés par une ponctuation normale) avant de continuer —
+  vérifié avec `reloadxml`/`reloadacl` propres ensuite, aucune trace résiduelle.
+Testé : API `acl` de FreeSWITCH (`fs_cli -x "acl <ip> sipv-trunks"`) — IP du
+fournisseur → `true` (autorisée), IP du serveur lui-même et IP quelconque → `false`
+(refusées). Gateway `t1001-gw-1e083163` toujours `REGED` après le restart du profil,
+`ping` OPTIONS réussi juste après (`state UP`), `/api/health` du backend vérifié
+sain, aucune anomalie dans les logs FreeSWITCH après coup.
+⚠️ Limite connue, à surveiller : l'ACL n'autorise qu'UNE seule IP (résolution DNS au
+moment de l'écriture). Si le fournisseur (ScopServ) utilise un pool de plusieurs
+IP/SBC pour ce trunk, ou si cette IP change, de vrais appels entrants pourraient être
+bloqués sans avertissement — à confirmer avec ScopServ (plage CIDR officielle si
+disponible) plutôt que de se fier à une résolution DNS ponctuelle.
+Réversible : sauvegardes faites avant modification —
+`/usr/local/freeswitch/conf/autoload_configs/acl.conf.xml.bak_20260807` et
+`sip_profiles/external.xml.bak_20260807`.
+Fichiers (config serveur, hors dépôt git) : `acl.conf.xml`, `sip_profiles/
+external.xml` sur 192.168.1.55.
+
+#### TASK-S051 [x] Bug + fonctionnalité — chaîne illimitée de destinations après un groupe d'appel sans réponse
+Demande de l'utilisateur (2026-08-07 matin), reformulée après plusieurs sessions
+sans suite ("ça fait plusieurs fois que je te le demande... c'est le concept de
+serveur SIP que je veux") : pouvoir ajouter autant de destinations de secours qu'il
+veut après un groupe d'appel (actuellement : raccroche après le `ring_time`, 20s par
+défaut). Voir [[feedback_log_verbal_requests_immediately]] — cette demande n'était
+tracée nulle part avant cette session, d'où la frustration légitime.
+
+Constat en creusant (bug réel, pas juste une fonctionnalité manquante) :
+`RingGroup.no_answer_destination` existe dans le modèle/API depuis TASK-023.9 mais
+n'était JAMAIS lu par `_ringgroup_dialplan_entries()` (`xml_curl.py`) dans le cas
+"groupe ouvert avec membres actifs" — seul le cas "groupe fermé par horaire"
+l'utilisait. Un champ configurable, visible dans l'API, qui ne faisait strictement
+rien en pratique — même famille de bug que TASK-S047/S048 la même nuit.
+
+Fait :
+- Nouveau modèle `RingGroupFailoverStep` (`models/ivr.py`) : `ring_group_id`,
+  `step_order`, `destination_type` (extension/ivr/queue/voicemail/hangup),
+  `destination`, `ring_seconds` (uniquement pour `extension` — combien de temps
+  sonner cette étape avant de passer à la suivante). Liste ordonnée, longueur
+  illimitée — remplace `no_answer_destination` (champ conservé en base pour
+  compat/lecture, plus lu par le dialplan, marqué `⚠️ LEGACY` dans l'API).
+- Migration `0057_ring_group_failover_steps.py` : crée la table + backfill (aucune
+  ligne trouvée en pratique — aucun groupe d'appel n'existait encore).
+- `api/v1/endpoints/ivr.py` : CRUD complet (`POST/PUT/DELETE .../failover-steps`),
+  `step_order` auto-incrémenté si omis à la création ; `RingGroupOut` expose
+  `failover_steps` (chargé trié par `step_order` via la relation ORM).
+- `api/v1/endpoints/xml_curl.py::_ringgroup_dialplan_entries()` : le dialplan émet
+  maintenant `hangup_after_bridge=false` puis une action `bridge` par étape en
+  séquence (comportement natif FreeSWITCH : une action qui échoue laisse la main à
+  la suivante dans la même `<condition>`) — voicemail/ivr/queue/hangup terminent
+  la chaîne, `hangup NORMAL_CLEARING` final explicite par sécurité.
+  ⚠️ Bug trouvé et corrigé EN TESTANT (pas laissé tel quel) : les étapes de type
+  "extension" passaient le numéro nu directement à `_bridge()` sans reconstruire le
+  username complet préfixé par le tenant (`t1001-101`), contrairement à la
+  convention déjà établie (TASK-023.29) — aurait échoué sur un vrai appel
+  (`user/101@sipv` ne correspond à aucune entrée réelle de l'annuaire). Fonction
+  signature étendue avec le paramètre `account`, même reconstruction que
+  `_inbound_actions_for`.
+Testé de bout en bout sur le serveur réel (groupe jetable, jamais un groupe de
+production) : création d'un groupe + 3 étapes (poste 101 10s, poste 102 8s,
+messagerie 100) → simulation d'un vrai lookup dialplan FreeSWITCH → XML confirmé
+avec le bon enchaînement et les bons usernames préfixés ; suppression d'une étape →
+XML mis à jour correctement ; groupe et étapes supprimés après validation.
+
+Côté ERPCRM (proxy + UI, même session) :
+- `backend/app/core/sipv_client.py` : `add/update/remove_ring_group_failover_step`.
+- `backend/app/api/v1/endpoints/companies.py` : `POST/PUT/DELETE
+  /companies/{id}/ring-groups/{rg_id}/failover-steps` (proxy).
+- `frontend/src/pages/CompanyDetail.jsx` (`RingGroupsSection`) : dans le détail
+  déplié d'un groupe, section "Si personne ne répond après Xs" — liste numérotée
+  des étapes (type + valeur + secondes si poste), bouton "+ Ajouter une
+  destination" réutilisable autant de fois que voulu, ✕ par étape.
+Testé de bout en bout via le proxy ERPCRM (compagnie "Simple IP inc.") : création
+groupe + étape + relecture confirmée, données de test supprimées après validation.
+Build frontend vérifié (`npm run build` OK), servi en direct (`vite preview`, pas de
+redémarrage requis).
+Fichiers SIPV : `backend/app/models/ivr.py`, `models/__init__.py`,
+`api/v1/endpoints/ivr.py`, `api/v1/endpoints/xml_curl.py`,
+`alembic/versions/0057_ring_group_failover_steps.py`.
+Fichiers ERPCRM : `backend/app/core/sipv_client.py`,
+`api/v1/endpoints/companies.py`, `frontend/src/pages/CompanyDetail.jsx`.
+
+#### TASK-S052 [~] Audit des champs SIPExtension stockés mais jamais câblés (renvois busy/offline)
+Demande explicite de l'utilisateur (2026-08-07 matin, suite à TASK-S051) : "la
+plupart des options ont des options, quand on fait une portion il faut mettre
+toute la portion pas juste le début" — voir [[feedback_complete_the_whole_portion]].
+Audit des champs `SIPExtension` documentés `⚠️ PAS ENCORE APPLIQUÉ`/`AUCUNE ACTION
+RÉELLE` depuis TASK-S018.3 (2026-07-17), pour voir lesquels avaient été réglés
+depuis (beaucoup l'ont été dans des sessions séparées, jamais cross-référencées
+dans la note d'origine) et lesquels restaient vraiment inertes.
+
+État constaté par champ :
+- `forward_immediate_enabled` : déjà câblé (TASK-023.6).
+- `dnd_enabled` : déjà câblé (TASK-023.6).
+- `auto_answer_enabled` : déjà câblé (TASK-023.11, intercom).
+- `forward_no_answer_enabled` + délai : déjà câblé (TASK-023.30/S023.31).
+- `forward_busy_enabled/destination` : **PAS câblé — corrigé cette tâche.**
+- `forward_offline_enabled/destination` : **PAS câblé — corrigé cette tâche.**
+- `call_permission` (local/national/international, S018.3) : toujours PAS câblé
+  pour de vrai — voir "Décision requise" plus bas, pas corrigé sans réponse.
+- `dnd_locked` : aucun appelant nulle part (ni SIPV ni ERPCRM) — voir "Bloqué" plus bas.
+- `max_concurrent_calls` : toujours pas câblé — pas traité cette session (voir
+  "Reste à faire").
+- `QueueMember.ring_even_if_busy`/`allow_multiple_queue_calls` (TASK-023.10) :
+  toujours pas câblés — voir "Bloqué" plus bas (même prérequis que MOH/TASK-S033).
+
+Fait (`forward_busy`/`forward_offline`) :
+- `api/v1/endpoints/xml_curl.py::_ext_dialplan_entries()` : structure purement
+  additive — une extension SANS `forward_busy_enabled` ni `forward_offline_enabled`
+  génère EXACTEMENT le même XML qu'avant cette tâche (vérifié caractère pour
+  caractère, voir tests plus bas). Seule une extension qui active l'un des deux
+  bascule sur une forme `<extension continue="true">` à conditions multiples :
+  bridge d'abord, puis `<condition field="${originate_disposition}"
+  expression="^USER_BUSY$">` pour le renvoi occupé, `expression="^(NO_ROUTE_
+  DESTINATION|SUBSCRIBER_ABSENT|UNALLOCATED_NUMBER)$"` pour le renvoi hors ligne,
+  puis un dernier `<condition>` catch-all identique au comportement historique
+  (sert de filet de sécurité si aucune des deux causes ne matche).
+  Réutilise `_forward_action_xml()` déjà existant (poste/BV/groupe d'appel).
+Testé : (1) régression — dialplan d'un poste sans busy/offline configuré comparé
+avant/après le déploiement, identique caractère pour caractère (postes 100/101/102
+réels) ; (2) nouvelle fonctionnalité — activé temporairement sur le poste de test
+101 (`forward_busy` → messagerie, `forward_offline` → poste 100), XML généré
+confirmé avec la structure multi-condition attendue ; poste remis à son état
+d'origine après le test, dialplan reconfirmé identique à l'état "avant".
+⚠️ [~] Ce qui N'EST PAS validé : la valeur EXACTE de `${originate_disposition}`
+FreeSWITCH pour chaque cause. `USER_BUSY` est une valeur standard bien documentée ;
+les 3 valeurs choisies pour "hors ligne" (`NO_ROUTE_DESTINATION`/
+`SUBSCRIBER_ABSENT`/`UNALLOCATED_NUMBER`) sont les plus plausibles pour un `user/`
+non enregistré mais pas confirmées avec un vrai appel vers un poste réellement
+débranché/éteint (aucun softphone disponible cette session pour le tester). Le
+mécanisme est conçu pour ne jamais régresser si les valeurs s'avèrent différentes
+(retombe simplement sur le comportement no-answer historique) — mais le
+routage busy/offline SPÉCIFIQUE reste à confirmer avec un vrai test d'appel avant
+de le considérer pleinement fiable en production.
+
+Décision requise avant d'aller plus loin sur `call_permission` : il existe DEUX
+systèmes de plan d'appel parallèles sur `SIPExtension` — le tri-état
+`call_permission` (local/national/international, S018.3, décoratif aujourd'hui,
+sert seulement au `toll_allow` du XML directory) ET les champs granulaires
+`allow_canada`/`allow_us`/`allow_international`/`allow_premium`/pays-préfixes-
+bloqués (S018.5, RÉELLEMENT appliqués via `_call_permission_gate_entries()`). Pas
+corrigé sans confirmation : deviner un mapping local/national/international ↔
+Canada/US/international/premium risquerait de créer soit une fausse sécurité (si
+le mapping est trop permissif) soit de bloquer des appels légitimes (si trop
+restrictif) — exactement le genre d'erreur que ce projet évite explicitement
+depuis TASK-S018.3 ("pas faite ici pour ne pas présenter une fausse sécurité"). À
+trancher avec l'utilisateur : garder les deux (call_permission mappé en plus, en
+ceinture-et-bretelles) ou retirer le simple tri-état de l'UI puisqu'il est
+redondant avec le système granulaire déjà actif.
+
+**Tranché (2026-08-07, même matin)** : Philippe confirme "Local/National/
+International pas besoin avec les cases Canada/US/international/premium" — retiré.
+`ExtensionDetail.jsx` : select + `CALL_PERMISSIONS` supprimés de la carte
+"Identification & plan d'appel" (ne reste que succursale/description). Champ
+`SIPExtension.call_permission` et `toll_allow` dans le XML directory laissés en
+place tels quels (décoratifs, pas nuisibles, cohérent avec le pattern déjà établi
+ailleurs dans ce projet de garder un champ LEGACY plutôt que de le purger sans
+raison) — seule la confusion côté UI est retirée. Build frontend vérifié
+(`npm run build` OK).
+
+Bloqué (prérequis plus gros, pas juste un champ à câbler) :
+- `dnd_locked` : censé empêcher un utilisateur du portail client de désactiver le
+  DND lui-même si l'admin l'a verrouillé — mais AUCUN code n'existe encore nulle
+  part (ni SIPV ni ERPCRM) qui permette à un utilisateur portail de modifier
+  `dnd_enabled` (TASKERPCRM TASK-019 "Portail Mon poste", `[ ]` jamais commencé).
+  `dnd_locked` n'a donc littéralement rien à verrouiller pour l'instant — pas un
+  bug de câblage, une fonctionnalité qui dépend d'une autre pas encore construite.
+- `QueueMember.ring_even_if_busy`/`allow_multiple_queue_calls` : même blocage que
+  TASK-S033 (MOH) découvert cette même nuit — `callcenter.conf.xml` n'est jamais
+  généré dynamiquement (`_handle_configuration()` ne gère que `ivr.conf`), donc
+  mod_callcenter tourne sans AUCUNE config par tenant. Câbler ces 2 champs sur un
+  système qui n'existe pas encore aurait été décoratif.
+
+Reste à faire (pas bloqué, juste pas fait cette session par manque de temps) :
+- `max_concurrent_calls` : mécanisme FreeSWITCH le plus probable = `mod_limit`
+  (`<action application="limit" data="hash {compte}_{poste} calls {max}"/>` avant
+  le bridge) — pas implémenté, sémantique exacte voulue (limite les appels
+  ENTRANTS vers ce poste ? les appels total incluant sortants ?) pas confirmée.
+
+Fichiers : `backend/app/api/v1/endpoints/xml_curl.py`.
+
+#### TASK-S054 [x] Champs config canaux SIP (IP entrante/sortante) sur le serveur
+Demande de l'utilisateur (2026-08-07) : son fournisseur SIP lui indique qu'il
+faudra 2 IP publiques distinctes pour les canaux — une pour les appels entrants,
+une pour les sortants. L'utilisateur ne connaît pas encore ces IP (à confirmer
+avec le fournisseur) — demande explicite de construire les CHAMPS/réglages, pas
+d'inventer ou deviner des valeurs.
+Fait :
+- `models/server.py` (`SipvServer`) : `sip_inbound_ip`/`sip_outbound_ip`
+  (nullable, String(45), IPv4/IPv6). `ip_address` existant conservé tel quel
+  (référence générale, pas remplacé).
+- Migration `0058_server_sip_channel_ips.py`.
+- `api/v1/endpoints/servers.py` : champs ajoutés à `ServerOut/Create/Update`.
+  ⚠️ Bug trouvé et corrigé en testant : `update_server()` exigeait
+  `get_current_user` (JWT SIPV strict) alors que `list_servers()` acceptait déjà
+  `get_current_user_or_service` (clé API ERPCRM) — le nouveau proxy PUT côté
+  ERPCRM échouait donc systématiquement (502 "SIPV injoignable"). Harmonisé sur
+  `get_current_user_or_service`, même pattern que le reste des endpoints proxy
+  ERPCRM→SIPV déjà établis cette nuit (dids.py, ivr.py, routes.py).
+- Côté ERPCRM : `sipv_client.update_server()`, nouveau `PUT /server/servers/{id}`
+  (n'existait pas du tout avant — la page Serveur ne pouvait QUE lister, aucune
+  édition possible jusqu'ici). `frontend/src/pages/Server.jsx` : nouvelle section
+  "Canaux SIP (fournisseur)" avec 2 champs (IP entrante/sortante), sauvegarde au
+  `onBlur`, avertissement explicite que rien n'est encore appliqué au réseau réel
+  du serveur — champs de configuration/référence seulement, pas branchés à l'ACL
+  (TASK-S050) ni à aucun binding FreeSWITCH pour l'instant.
+Testé de bout en bout via le proxy ERPCRM (valeurs jetables 1.2.3.4/1.2.3.5,
+retirées après validation) : PUT confirmé propagé jusqu'à SIPV, relecture
+confirmée. Build frontend vérifié (`npm run build` OK).
+Reste à faire : rien de prévu tant que l'utilisateur n'a pas les vraies IP de son
+fournisseur — appliquer ces valeurs au binding réseau réel (external_sip_ip,
+éventuellement l'ACL TASK-S050 si le fournisseur distingue aussi ses propres IP
+entrante/sortante) sera une tâche séparée une fois les IP connues.
+Fichiers : `sipv/backend/app/models/server.py`, `api/v1/endpoints/servers.py`,
+`alembic/versions/0058_server_sip_channel_ips.py`,
+`erpcrm/backend/app/core/sipv_client.py`, `api/v1/endpoints/server.py`,
+`erpcrm/frontend/src/pages/Server.jsx`.
+
+#### TASK-S048 [x] Bug critique — TenantDID jamais synchronisé vers InboundRoute (routage réel)
+Découvert cette session (2026-08-07 nuit) en creusant TASK-S047. `_dialplan_public()`
+(`xml_curl.py`, appelé par FreeSWITCH pour CHAQUE appel entrant réel) lit UNIQUEMENT
+`InboundRoute` — jamais `TenantDID`. Or `sync.py::sync_did()` (appelé par ERPCRM à
+chaque changement de destination d'un DID, chemin normal quotidien) n'écrivait QUE
+dans `TenantDID`, malgré son propre docstring affirmant le contraire ("SIPV reste la
+source réelle du routage d'appel" — faux, vérifié dans le code réel). Même lacune
+dans `dids.py` (chemin SIPV natif). Concrètement : changer la destination d'un DID
+depuis la fiche compagnie ERPCRM (ou l'admin SIPV) n'avait AUCUN effet sur un appel
+entrant réel, sauf pour le seul DID de test (`15143222112`, TASK-S044) routé par un
+script ponctuel qui touchait directement `InboundRoute` en contournant tout le reste.
+Avec les vraies lignes SIP arrivées cette semaine, ce bug aurait cassé silencieusement
+tout routage entrant configuré normalement.
+Fait :
+- `app/core/did_route_sync.py` (nouveau) : `sync_inbound_route_from_did(did, db)` —
+  crée/met à jour/supprime l'`InboundRoute` miroir d'un `TenantDID` (retrouvée par
+  `did_id`, avec fallback par `did_number` pour adopter une route legacy créée avant
+  ce correctif sans lien `did_id`). Pas de destination ou DID inactif → route retirée
+  (jamais de routage fantôme vers une ancienne destination).
+- Appelé depuis `sync.py::sync_did()` (chemin ERPCRM, create + update) et
+  `dids.py::create_did()/update_did()/delete_did()` (chemin SIPV natif) — les deux
+  seuls points d'entrée qui modifient un DID.
+- `routes.py` : `DEST_TYPES` (InboundRoute) était en retard sur `dids.py` — ajouté
+  fax/conference/transfer/message pour cohérence d'affichage.
+Testé de bout en bout via API (tenant test `t1001`, DID jetable `9995551234`, jamais
+un vrai DID de production) : création d'un `TenantDID` avec `destination_type=message`
+→ `InboundRoute` créée automatiquement et confirmée en base ; simulation d'un vrai
+lookup dialplan FreeSWITCH (`POST /xml_curl` avec les champs exacts `Caller-Context`/
+`Caller-Destination-Number` qu'envoie réellement FreeSWITCH) → XML de routage correct
+retourné ; désactivation du DID → `InboundRoute` supprimée automatiquement. Données de
+test entièrement nettoyées après validation.
+⚠️ Reste à faire (hors scope de cette session, découvert en testant) : les
+`InboundRoute` déjà en place pour de vrais DID configurés AVANT ce soir (s'il y en a,
+au-delà du DID de test `15143222112`) n'ont pas été auditées une par une — à vérifier
+avec l'utilisateur qu'aucune destination configurée récemment côté ERPCRM n'a été
+silencieusement ignorée avant ce correctif.
+Fichiers : `backend/app/core/did_route_sync.py` (nouveau),
+`api/v1/endpoints/sync.py`, `api/v1/endpoints/dids.py`, `api/v1/endpoints/routes.py`.
+Déployé sur le serveur réel (192.168.1.55), migration 0056 appliquée,
+`sipv-backend`/`sipv-backend-tls` redémarrés, `/api/health` vérifié après coup.
+
+#### TASK-S033 [x] MOH — Music on Hold (câblé pour le hold_music général ; queue mod_callcenter reste bloquée)
+Demande de l'utilisateur (2026-08-07/08) : bibliothèque MOH gérée dans "Serveur"
+(admin ERPCRM) pour voir/téléverser tous les fichiers ; page Compagnie pour voir/choisir
+les MOH dédiées à ce tenant ; un fichier téléversé SANS compagnie assignée est "Global"
+et apparaît comme option pour TOUTES les compagnies ; sélection multiple et ordonnée
+par compagnie.
+⚠️ Rappel du blocage découvert en creusant TASK-S047/S048 (toujours vrai, non résolu
+ce soir, scope différent) : `Queue.music_on_hold` (mod_callcenter, musique d'attente
+en file d'attente) reste un champ mort — `callcenter.conf.xml` n'est jamais généré
+dynamiquement par `xml_curl.py`. CE QUI A ÉTÉ FAIT ce soir est différent et
+indépendant : le `hold_music` général (musique jouée pendant un simple hold/transfert
+d'appel, variable de canal FreeSWITCH standard), qui ne dépend PAS de mod_callcenter et
+pouvait être câblé sans ce prérequis.
+Fait :
+- `models/moh.py` (nouveau) — `MohFile` (tenant_id FK nullable = global, name,
+  filename, duration_seconds, is_active, created_at) + `TenantMohSelection`
+  (tenant_id, moh_file_id, sort_order — sélection multiple ordonnée par tenant).
+- `api/v1/endpoints/moh.py` (nouveau) — CRUD complet (upload multipart avec même
+  conversion ffmpeg que prompts.py/voicemail.py : WAV PCM 8kHz mono + durée via
+  ffprobe), `GET ""` (toutes, page Serveur), `GET /available/tenant/{id}` (globales +
+  dédiées à ce tenant, page Compagnie), `PUT/GET /selection/tenant/{id}` (remplacement
+  complet ordonné), `DELETE` (régénère les tenants affectés).
+- `core/local_stream.py` (nouveau) — approche additive volontaire pour ne JAMAIS
+  toucher au `local_stream.conf.xml` statique existant (5 flux par défaut déjà en
+  place) : un seul ajout ponctuel `<X-PRE-PROCESS include data="../local_stream/*.xml">`
+  fait lors du déploiement (voir ci-dessous), puis CE module écrit/réécrit un fragment
+  `<include>` DISTINCT par tenant dans ce répertoire — jamais le fichier principal.
+  Même pattern déjà utilisé pour les gateways de trunk (`sip_profiles/external/*.xml`).
+  `regenerate_tenant_moh_stream()` : recopie les fichiers sélectionnés (ordre =
+  sort_order) dans `sounds/sipv_moh/{account}/`, écrit `local_stream/moh_{account}.xml`,
+  recharge `mod_local_stream` via `fs_cli`. Sélection vidée → fragment + dossier
+  retirés (le tenant retombe sur le flux "default" du profil SIP, comportement standard
+  FreeSWITCH). Best-effort total (try/except + log), ne bloque jamais l'appelant.
+- `xml_curl.py::_user_xml()` — `hold_music_var` : si un fragment existe pour ce tenant
+  (vérif filesystem, pas de requête DB — appelé à chaque REGISTER), règle la variable
+  de canal `hold_music=local_stream://moh_{account}` dans le directory XML.
+- `main.py` : `include_router(moh.router, prefix="/api/v1/moh")`.
+- Déploiement serveur réel (192.168.1.55, hors git) : création de
+  `conf/local_stream/` et `sounds/sipv_moh/` (owner `sipv:sipv` — le service tourne
+  sous cet utilisateur, pas `freeswitch`) ; UNE modification ponctuelle de
+  `autoload_configs/local_stream.conf.xml` (ajout de la ligne `X-PRE-PROCESS include`
+  juste après `<configuration>`, backup `.bak_20260808` avant coup) ; les 5
+  `<directory>` par défaut jamais touchés (deux d'entre eux ont des chemins cassés
+  préexistants, sans lien avec ce soir).
+Bug corrigé pendant l'implémentation : `moh_stream_name()` produisait
+`"moh_t{account_number}"` où `account_number` a déjà "t" en préfixe (ex: "t1001"),
+donnant "moh_tt1001" — corrigé en `f"moh_{account_number}"`.
+Bug corrigé après premier test bout en bout : `GET /api/v1/moh` (liste globale, page
+Serveur) utilisait `get_current_user` (JWT SIPV strict) au lieu de
+`get_current_user_or_service` — ERPCRM n'a pas de compte SIPV, appelle toujours via
+X-Api-Key, donc cet appel échouait TOUJOURS en 401 malgré tous les autres endpoints MOH
+correctement câblés avec `get_current_user_or_service`. Même famille de bug que le fix
+`update_server` de TASK-S054. Redéployé + `sipv-backend-tls` (le service qui sert
+réellement le trafic ERPCRM←→SIPV, distinct de `sipv-backend`) redémarré — le premier
+redémarrage n'avait ciblé QUE `sipv-backend`, oubli initial corrigé dans la foulée.
+Testé en direct sur le serveur réel (tenant test `t1001`) : upload d'un WAV de test
+global, apparu dans liste globale + liste "disponible" du tenant, sélection appliquée,
+fragment `local_stream/moh_t1001.xml` + dossier `sounds/sipv_moh/t1001/` confirmés créés
+avec le contenu attendu, `reload mod_local_stream` propre (aucune nouvelle erreur).
+Sélection vidée puis fichier supprimé : fragment + dossier retirés automatiquement,
+fichier uploadé retiré. Rien laissé en place après le test.
+Frontend ERPCRM (pas SIPV cette fois — décision explicite de l'utilisateur, contrairement
+à TASK-S046/Phrases) : voir TASK-021.x dans TASKERPCRM.md (page Serveur + fiche
+Compagnie).
+Reste bloqué (hors scope, prérequis plus large, voir avertissement ci-dessus) : MOH de
+file d'attente (mod_callcenter/`Queue.music_on_hold`) — nécessite la génération
+dynamique de `callcenter.conf.xml`, jamais entamée.
+Migration : `0059_moh.py`.
+Fichiers : `backend/app/models/moh.py` (nouveau), `models/__init__.py`,
+`core/local_stream.py` (nouveau), `api/v1/endpoints/moh.py` (nouveau),
+`api/v1/endpoints/xml_curl.py`, `main.py`, `alembic/versions/0059_moh.py` (nouveau).
+
+##### TASK-S033.1 [x] Écoute par appel poste + ordre liste/aléatoire par tenant
+
+Voir TASKERPCRM.md TASK-028.4 pour le détail complet côté ERPCRM (demande
+utilisateur, UI). Côté SIPV :
+- `POST /v1/moh/{id}/call` (meme principe que `AudioPrompt.call`/TASK-S055,
+  `esl.originate_app` direct). ⚠️ Bug trouvé en testant en direct :
+  lecture directe depuis `uploads/moh_files/` (sous `/home/sipv/`, 750)
+  échouait "Permission denied" pour l'utilisateur `freeswitch` --
+  traversée du dossier parent bloquée, pas juste les droits du fichier
+  lui-même (même cause que `PROMPT_CACHE_DIR`, TASK-S055). Corrigé :
+  copie vers `/usr/local/freeswitch/conf/moh_call_cache/` (créé
+  manuellement, `chown sipv:sipv`, `755`, pas persistant via
+  code/migration) avant de jouer.
+- `Tenant.moh_shuffle` (nouveau, migration `0060`, défaut `true` =
+  comportement historique inchangé) — `regenerate_tenant_moh_stream` lit
+  ce champ au lieu de `shuffle=true` codé en dur. Mise à jour via
+  `PUT /tenants/{id}` (générique, `setattr`), déclenche la régénération du
+  flux `local_stream` immédiatement.
+- 4 pistes stock FreeSWITCH (`sounds/music/8000/*.wav`, déjà 8kHz)
+  importées comme `MohFile` globaux actifs par défaut (script ponctuel,
+  pas une migration) : Bach, Ponce, Granados, Albéniz.
+
+Migration : `0060_tenant_moh_shuffle.py`.
+Fichiers : `models/tenant.py`, `api/v1/endpoints/{tenants,moh}.py`,
+`core/local_stream.py`, `alembic/versions/0060_tenant_moh_shuffle.py`.
+
+##### TASK-S033.2 [x] 0.5s de silence avant le début du MOH ("ça commence trop raide")
+
+`hold_music` passe de `local_stream://{stream}` à
+`file_string://silence_stream://500!local_stream://{stream}` --
+`file_string://` (verifie dans le source FreeSWITCH,
+`mod_dptools.c::file_string_file_open`) chaine plusieurs sources avec `!`
+en une seule lecture ; `silence_stream://500` genere 500ms de silence
+(mod_tone_stream). Rejoue a CHAQUE Hold (nouveau `playback()` a chaque
+fois, confirme dans les logs plus tot dans cette session) meme si
+`local_stream` est un flux partage continu -- le silence, lui, n'est pas
+partagé, donc l'effet "pause avant le début" fonctionne a chaque hold,
+pas juste au tout premier appel.
+Fichiers : `api/v1/endpoints/xml_curl.py` (`_user_xml`, `hold_music_var`).
+
+##### TASK-S033.3 [ ] Même délai pour les Phrases IVR -- configurable, 0.5s par défaut (PAS COMMENCÉ, prochaine conversation)
+
+Demande de l'utilisateur (2026-08-12) : même principe que TASK-S033.2 mais
+pour les Phrases IVR (`AudioPrompt`, TASK-S046/TASK-S055) -- un délai de
+silence AVANT la lecture d'une phrase choisie dans un IVR, 0.5s par défaut,
+mais CONFIGURABLE (pas fixe comme pour le MOH). Explicitement reporté à une
+prochaine conversation par l'utilisateur -- ne pas commencer sans nouveau
+GO. Probablement : nouveau champ sur `AudioPrompt` ou sur le point
+d'utilisation dans l'IVR (`IVROption`?), à clarifier au démarrage de cette
+tâche (où exactement le délai doit être réglable -- par phrase ? par usage
+dans un IVR précis ?). Même mécanisme technique que S033.2
+(`file_string://silence_stream://{ms}!...`) réutilisable.
+
+#### TASK-S046 [x] Bibliothèque de phrases/annonces réutilisables (Prompts)
+Demande de l'utilisateur (2026-08-07, tard le soir — terminologie "phrases" empruntée
+à ScopServ) : un enregistrement uploadé une seule fois et réutilisable à plusieurs
+endroits — attribuable à un IVR (greeting), ou joué directement comme destination
+d'un DID/route entrante, sans dupliquer le fichier par usage. Emplacement UI confirmé
+par l'utilisateur : nouvel onglet "Phrases" dans `TenantDetail.jsx` (admin SIPV).
+Fait :
+- `models/prompt.py` (nouveau) — `AudioPrompt` (tenant_id FK CASCADE, name,
+  filename, duration_seconds nullable, is_active, created_at).
+- `api/v1/endpoints/prompts.py` (nouveau) — upload multipart (name + file, même
+  conversion ffmpeg que `voicemail.py::upload_greeting` : WAV PCM 8kHz mono, + durée
+  calculée via `ffprobe`), GET liste par tenant, GET fichier, PUT (rename/actif),
+  DELETE. `get_current_user_or_service` (accepte X-Api-Key ERPCRM comme les autres
+  endpoints proxy) — pas de compte SIPV requis pour un futur appel depuis ERPCRM.
+- **Suppression bloquée si référencée** (décision prise sans redemander : cohérent
+  avec la loi "toujours pouvoir rediter"/robustesse déjà établie sur ce projet) —
+  `_prompt_usages()` vérifie IVR.greeting_prompt_id, TenantDID (destination et
+  after_message_destination de type "message"), InboundRoute — retourne la liste
+  lisible des usages dans le message d'erreur 400 plutôt que de laisser une
+  référence orpheline.
+- `main.py` : `include_router(prompts.router, prefix="/api/v1/prompts")`.
+- Frontend (`frontend/src/pages/TenantDetail.jsx`) : nouvel onglet "Phrases" — champ
+  nom + input fichier + bouton téléverser, tableau (nom/durée/statut cliquable pour
+  actif-inactif/supprimer). `npm run build` vérifié OK.
+Migration : `0056_audio_prompts.py` (table `audio_prompts`, voir aussi TASK-S047).
+Testé en direct sur le serveur réel (tenant test `t1001`) : upload d'un WAV de test
+(conversion ffmpeg + durée détectée à 2s confirmées), liste, suppression bloquée avec
+message listant les usages, suppression réussie une fois libérée. Fichier + entrée DB
+de test retirés après validation.
+Reste à faire (hors scope ce soir) : le frontend admin SIPV (`dist/`) n'est PAS servi
+par un service sur le serveur (nginx ne sert que l'ancien FusionPBX abandonné) — même
+constat que TASK-S036/S018 déjà documenté, pas une régression de cette tâche. Pour
+voir l'onglet "Phrases" il faut lancer le frontend en dev (`npm run dev`) comme pour
+le reste de l'admin SIPV.
+Fichiers : `backend/app/models/prompt.py` (nouveau), `models/__init__.py`,
+`api/v1/endpoints/prompts.py` (nouveau), `main.py`,
+`alembic/versions/0056_audio_prompts.py` (nouveau),
+`frontend/src/pages/TenantDetail.jsx`.
+
+#### TASK-S047 [x] Câblage réel des phrases dans IVR (greeting) + destination DID/route "message"
+Dépend de : TASK-S046 ✓, TASK-S048 ✓ (sans le fix S048, ce câblage n'aurait jamais
+été atteignable par un DID configuré normalement depuis ERPCRM).
+Décisions confirmées par l'utilisateur avant implémentation : page dans TenantDetail
+(fait, voir TASK-S046) ; raccroché automatique PAR DÉFAUT après la lecture du
+message ; possibilité d'"Ajouter une destination" pour chaîner vers une 2e
+destination après le message (au lieu de raccrocher).
+Fait :
+- `models/sip.py` (`TenantDID`) et `models/dialplan.py` (`InboundRoute`) : nouveaux
+  champs `after_message_destination_type`/`after_message_destination` (nullable,
+  significatifs seulement quand `destination_type == "message"`).
+- `models/ivr.py` (`IVR`) : nouveau champ `greeting_prompt_id` (FK `audio_prompts.id`,
+  `ON DELETE SET NULL`) — prioritaire sur `greeting_text` (texte libre/TTS) quand
+  renseigné, sans rien casser pour les IVR existants (fallback inchangé).
+- `api/v1/endpoints/xml_curl.py` :
+  - `_inbound_actions()` renommée en délégation vers `_inbound_actions_for(dest_type,
+    dest, tenant, db, after_type, after_dest)` — même logique extension/ivr/queue/
+    voicemail/hangup qu'avant (aucun changement de comportement), + nouveau cas
+    `dest_type == "message"` : `answer` + `playback` du fichier du prompt, puis soit
+    `hangup NORMAL_CLEARING` (défaut), soit récursion dans
+    `_inbound_actions_for(after_type, after_dest, ...)` si `after_type` est renseigné
+    — un seul niveau de chaînage autorisé (`after_type == "message"` explicitement
+    ignoré pour ne jamais boucler).
+  - `_config_ivr()` : precharge les `AudioPrompt` référencés en un seul aller-retour
+    DB, utilise le chemin du fichier comme `greet-long`/`greet-short` quand
+    `greeting_prompt_id` est renseigné et le prompt actif, sinon comportement
+    inchangé (`greeting_text` ou fichier par défaut).
+- `api/v1/endpoints/ivr.py` : `greeting_prompt_id` ajouté à `IVROut`/`IVRCreate`, +
+  nouveau `PUT /ivr/{ivr_id}` (`IVRUpdate`) — n'existait pas avant (seuls list/create/
+  delete existaient), nécessaire pour assigner un greeting après coup.
+- `api/v1/endpoints/dids.py`/`sync.py`/`routes.py` : `after_message_destination_type`/
+  `after_message_destination` exposés sur `DIDOut/Create/Update`,
+  `ERPCRMDidSync`, `InboundRouteOut/Create/Update`.
+Testé de bout en bout sur le serveur réel (simulations des vraies requêtes que
+FreeSWITCH envoie, pas juste des appels API) :
+- `message` sans chaînage → XML confirmé : `answer` + `playback` + `hangup
+  NORMAL_CLEARING`.
+- `message` avec `after_message_destination_type=extension` → XML confirmé :
+  `playback` puis `bridge user/t1001-100@sipv` (pas de hangup).
+- `greeting_prompt_id` sur un IVR → `ivr.conf` généré confirmé avec `greet-long`/
+  `greet-short` pointant sur le fichier du prompt.
+- Suppression d'un prompt encore utilisé (greeting IVR + destination DID) → bloquée
+  avec le détail des deux usages (voir TASK-S046).
+Écart vs plan initial : les OPTIONS d'IVR par chiffre (0-9/*/#, `IVROption.
+destination_type`) n'ont PAS reçu de type "message" — volontairement laissé de côté.
+`_ivr_option_action()` génère un seul `menu-exec-app <app> <args>` par option
+(mod_dptools FreeSWITCH n'exécute qu'UNE app par entrée) ; "jouer un message PUIS
+raccrocher/continuer" dans ce contexte précis nécessiterait de transférer l'appel
+vers une extension de dialplan synthétique dédiée — plus risqué et non testable
+sans un vrai appel (pas de softphone disponible dans cette session). Seuls les DEUX
+usages explicitement décrits par l'utilisateur ce soir sont couverts : greeting
+d'IVR, et destination directe d'un DID/route entrante. Documenté comme TASK-S047.1
+si un jour demandé.
+⚠️ Reste à faire côté ERPCRM (pas fait ce soir, voir TASKERPCRM.md) : le sélecteur
+"Message enregistré" existe déjà dans `CompanyDetail.jsx`
+(`DID_DESTINATION_TYPES`), mais `destinationSelectOptions()` ne connaît pas encore
+les prompts d'un tenant — aujourd'hui il faut coller l'UUID du prompt à la main dans
+le champ destination (fonctionnel mais peu ergonomique), et il n'y a aucun contrôle
+"Ajouter une destination" pour le chaînage après-message. Backend 100% prêt
+(`GET /prompts/tenant/{id}` accepte déjà X-Api-Key ERPCRM) — reste juste le proxy
+ERPCRM + la liste déroulante + le bouton de chaînage côté frontend.
+Migration : `0056_audio_prompts.py` (mêmes fichiers que TASK-S046, une seule
+migration pour les deux tâches).
+Fichiers : `backend/app/models/sip.py`, `models/dialplan.py`, `models/ivr.py`,
+`api/v1/endpoints/xml_curl.py`, `api/v1/endpoints/ivr.py`, `api/v1/endpoints/dids.py`,
+`api/v1/endpoints/sync.py`, `api/v1/endpoints/routes.py`.
 
 #### TASK-S034 [ ] Alertes trunk/extension
 Événements surveillés via ESL : trunk DOWN, extension unregistered, perte registration, HEARTBEAT absent.
@@ -839,15 +1561,48 @@ Alerte si connexion perdue : webhook + courriel + SMS (même destinations que TA
 
 | Task       | Module-clé   | Description                                                                              |
 |------------|--------------|------------------------------------------------------------------------------------------|
-| TASK-S032  | billing link | SIPV → ERPCRM billing triggers (service créé/modifié/retiré → lignes facturation prorata)|
+| TASK-S032  | billing link | ✓ SIPV → ERPCRM billing triggers (service créé/retiré → lignes facturation + prorata)   |
 
-#### TASK-S032 [ ] Billing triggers SIPV → ERPCRM
-Événements déclencheurs côté SIPV : création/retrait extension, ajout/retrait DID,
-ajout/retrait numéro 1-800, activation/désactivation service payant.
-SIPV appelle ERPCRM : POST {ERPCRM_HOST}/api/v1/billing/sipv-event (header X-Api-Key).
-ERPCRM crée/ajuste/retire lignes de facturation récurrentes avec calcul prorata.
-Services facturables : extensions, DIDs, 1-800, options payantes, services récurrents.
-Usage facturable (1-800, international, minutes) : remonté depuis CDR (TASK-S009).
+#### TASK-S032 [x] Billing triggers SIPV → ERPCRM
+Demande explicite de l'utilisateur (2026-08-08) : facturation automatique
+obligatoire ("je veux une facturation automatique pas le choix pour éviter que
+je donne des services gratuits"), avec retrait au prorata de la date de
+facturation. Design confirmé par l'utilisateur : une seule récurrence par
+compagnie (toutes les lignes de service ensemble), date de départ + fréquence
+choisies à l'activation du tenant SIPV, article "Prorata" dédié pour les
+crédits de retrait, nouvel onglet "Récurrence" côté ERPCRM.
+
+Protection double-facturation (clients ScopServ actuels) : vérifié en direct
+qu'un seul tenant existe dans SIPV (`t1001` = Simple IP inc., aucun autre
+client n'a encore de tenant) — la protection naturelle est que `sipv_enabled`
+non coché = aucun tenant = rien à facturer. Confirmé par l'utilisateur comme
+suffisant (pas d'interrupteur "facturation active" séparé demandé).
+
+Fait côté SIPV :
+- `app/core/erpcrm_client.py` : `send_billing_event()` — appel best-effort vers
+  `POST {ERPCRM_API_URL}/api/v1/billing/sipv-event` (X-Api-Key SIPV_API_KEY,
+  même TLS inter-serveurs déjà en place TASK-039).
+- `api/v1/endpoints/extensions.py` : `create_extension`/`delete_extension`
+  envoient `extension_added`/`extension_removed` (service_ref = id du poste,
+  stable pour retrouver la ligne au retrait) — best-effort, ne bloque jamais
+  la création/suppression réelle du poste si ERPCRM est injoignable.
+- `api/v1/endpoints/sync.py::sync_did()` : `did_added` envoyé UNIQUEMENT sur
+  `action == "created"` (pas update/adopted) -- c'est le chemin RÉEL de
+  création des DID en pratique (ERPCRM maître, TASK-S010.5), contrairement à
+  `dids.py::create_did()` qui est le chemin natif SIPV rarement emprunté pour
+  de vrais DID (câbler seulement ce dernier aurait été un câblage décoratif,
+  même piège que TASK-S047/S048/S051 -- vérifié explicitement avant d'écrire
+  le code, pas après).
+- `api/v1/endpoints/dids.py::delete_did()` : `did_removed` — chemin unique de
+  suppression peu importe l'appelant (ERPCRM proxy ou admin SIPV natif), donc
+  aucun risque de double notification contrairement à la création.
+Testé en direct (pas juste simulé) : appel réel `erpcrm_client.send_billing_event()`
+depuis le serveur SIPV vers ERPCRM (vraie connexion réseau/TLS) — ligne confirmée
+créée côté ERPCRM, puis retrait confirmé, aucune trace résiduelle après nettoyage.
+Voir TASKERPCRM.md TASK-021 pour le détail complet côté ERPCRM (modèles,
+calcul de prorata, onglet Récurrence, tests de bout en bout).
+Fichiers : `backend/app/core/erpcrm_client.py`, `api/v1/endpoints/extensions.py`,
+`api/v1/endpoints/dids.py`, `api/v1/endpoints/sync.py`.
 
 ---
 
@@ -1943,7 +2698,7 @@ Template + les 2 téléphones supprimés après coup (0 ligne `phone_button_temp
 Fichiers : sipv/backend/app/models/provisioning.py, models/__init__.py,
 api/v1/endpoints/provisioning.py, alembic/versions/0041_button_templates.py.
 
-### TASK-S011.4 [ ] Auto-provisioning Grandstream (fichier cfg<MAC>.xml, zero-touch)
+### TASK-S011.4 [~] Auto-provisioning Grandstream (fichier cfg<MAC>.xml, zero-touch)
 Demande de l'utilisateur (2026-07-24) : configuration réseau automatique du téléphone
 au lieu de la configuration manuelle qu'on vient de faire à la main pour le GXP2135 —
 référence P-codes Grandstream fournie par l'utilisateur (firmware 1.0.11.106), à
@@ -2011,6 +2766,69 @@ dossier malgré la mention de l'utilisateur — la seule photo disponible reste
 `/home/simpleip/Photo/GXP2135_BOUTON.png` (fournie plus tôt, pour TASK-S011.3).
 À consulter directement dans ces fichiers au moment d'implémenter plutôt que de
 deviner un nom de P-code — volumineux, pas dupliqué ici.
+
+**Fait le 2026-08-02** : premier vrai `config_template` GXP2135 écrit (Jinja2, notre
+propre fichier — jamais de valeur copiée du fichier ScopServ réel fourni par
+l'utilisateur comme référence structurelle, ni de la doc officielle Grandstream,
+seulement les noms/positions de P-codes). Croisé le fichier ScopServ réel
+(`/home/simpleip/Scopserv/cfg000b82bc987e.xml`, poste confirmé fonctionnel par
+l'utilisateur) contre la doc officielle `gxp2130_40_60_70_35_config_1.0.11.106.txt`
+pour valider chaque P-code avant de l'utiliser.
+- Catalogue `PhoneModel` séparé : la ligne combinée "GXP2130/40/60/70/35" devient 5
+  lignes individuelles (GXP2135 garde le même id — renommage, pas de recréation —
+  pour ne pas casser un `ProvisionedPhone` déjà provisionné dessus). GXP2130/2140/
+  2160/2170 créés vides (`config_template=NULL`), prêts pour plus tard.
+- `get_phone_config` (endpoint existant) étendu : eager-load `phone.buttons` +
+  `extension.tenant.server`, construit le contexte Jinja2 complet (compte SIP,
+  transport, protocole/serveur de provisioning, options fusionnées).
+- **Bug trouvé et corrigé pendant le test réel** : `extension.password` est stocké
+  chiffré (Fernet, même convention que `xml_curl.py`) — le premier jet du template
+  l'exposait tel quel (`{{ extension.password }}`), ce qui aurait envoyé un poste
+  physique avec un mot de passe SIP illisible. Corrigé : déchiffré dans le contexte
+  (`ext_password`, via le `_decrypt` déjà existant dans `provisioning.py`) avant le
+  rendu. Trouvé par un test réel contre un poste de test (`Test Trois`), pas par
+  relecture — leçon : toujours faire un rendu réel avant de considérer un template fini.
+- Bloc touches programmables (P238xx, BLF/speed-dial/pickup) : réutilise
+  `PhoneButton` existant (`button_type`/`label`/`value`/`sip_account_index`), aucune
+  nouvelle table. **Ambiguïté résolue empiriquement** : la doc officielle étiquette
+  la légende de ce bloc "Dynamic VPK" (0-26, où 1=BLF), mais le fichier ScopServ réel
+  et fonctionnel utilise en pratique la légende "Fixed VPK" (-1 à 36, où 11=BLF,
+  10=Speed Dial) — confirmé par test direct (rendu affiche bien `P23800=11` pour un
+  bouton BLF réel). La doc semble mal étiquetée au-delà du 6e VPK ; le mapping
+  `BUTTON_TYPE_TO_GS_MODE` dans `provisioning.py` suit le fichier réel, pas la doc.
+- Testé de bout en bout contre les 2 postes de test actifs (`curl .../config`),
+  avec et sans bouton BLF configuré — rendu XML complet vérifié à l'œil.
+- **Reste à faire** (non touché aujourd'hui, hors demande) : le déclenchement
+  "premier démarrage zero-touch" (DHCP option 66 vs configuration manuelle unique
+  de `P237`) — question posée dans la version précédente de cette entrée, toujours
+  sans réponse, pas nécessaire pour les tests actuels (postes déjà configurés une
+  fois manuellement).
+Fichiers : sipv/backend/app/api/v1/endpoints/provisioning.py, app/models/tenant.py,
+alembic/versions/0045_gxp2135_provisioning.py.
+
+### TASK-S011.5 [x] Catalogue d'options téléphonie — défaut compagnie + override poste
+Demande de l'utilisateur (2026-08-02) : reproduire le concept "Options" de l'UCM
+Grandstream (catalogue de réglages, seuls ceux ajoutés explicitement apparaissent —
+page propre par défaut) sur 2 niveaux : Compagnie (défaut global) et Contact
+(personnalisation qui écrase le défaut compagnie pour ce poste précis seulement).
+- `Tenant.phone_option_defaults` (JSON, nullable) — défauts niveau compagnie.
+- `ProvisionedPhone.extra_config` (JSON, existait déjà) — override niveau poste,
+  réutilisé tel quel plutôt que d'ajouter un nouveau champ.
+- Fusion dans `get_phone_config` : défaut système (`PHONE_OPTION_SYSTEM_DEFAULTS`,
+  codé en dur dans `provisioning.py`) → `Tenant.phone_option_defaults` → `Phone
+  Provisioned.extra_config`, le plus spécifique gagne (même esprit que
+  `resolve_setting()`, mais sur un dict libre plutôt que des colonnes nommées).
+- Catalogue volontairement minimal pour l'instant (une seule option : langue du
+  poste, P1362) — extensible plus tard sans migration puisque tout passe par un
+  dict JSON, catalogue affiché côté ERPCRM (`ref_data.py`).
+- `GET /{tenant_id}` et `PUT /{tenant_id}` (tenants.py) changés de `get_current_user`
+  à `get_current_user_or_service` pour qu'ERPCRM puisse les appeler en proxy
+  (X-Api-Key) — même pattern déjà utilisé ailleurs, aucun autre endpoint tenant touché.
+- Testé de bout en bout : défaut compagnie seul (P1362=fr rendu), override poste
+  seul gagnant sur le défaut compagnie (P1362=auto malgré compagnie=fr), puis
+  remis à vide après le test (aucune donnée réelle laissée modifiée).
+Fichiers : sipv/backend/app/models/tenant.py, api/v1/endpoints/tenants.py,
+api/v1/endpoints/provisioning.py, alembic/versions/0045_gxp2135_provisioning.py.
 
 ### TASK-023.13 [x] PhoneModel.device_type (téléphone/ATA/softphone/intercom)
 Champ manquant confirmé en lisant le modèle (migration `0036_phone_device_type`,
@@ -2417,6 +3235,702 @@ poste non enregistré (tout `null`, pas d'erreur) ; `active_call: false` correct
 l'absence d'appel. Les 2 postes de test TLS toujours intacts après le redémarrage.
 
 
+### TASK-S041 [x] Fix — courriels cron root rebondissaient vers mail.simpleip.tel
+Découvert en marge du module RDV ERPCRM (TASK-026, ERPCRM) : Philippe a reçu un
+courriel avec l'expéditeur affiché "root" et aucun objet. Investigation via SSH
+sur sipv-lab (192.168.1.55) :
+- `/var/log/mail.log` montrait une tâche cron quotidienne de `root` (~519KB,
+  probablement un rapport système type logwatch) à 06h25 chaque jour depuis au
+  moins le 30 juillet, qui échouait avec "550 Sender verify failed" / "account
+  may not exist" en tentant de relayer vers `mail.simpleip.tel`.
+⚠️ Bug : `mydestination = localhost` seulement dans `/etc/postfix/main.cf`, sans
+   `$myhostname` (sipv-lab) — Postfix ne reconnaissait donc pas `root@sipv-lab`
+   comme une destination locale et tentait de le relayer via `relayhost`
+   (mail.simpleip.tel) au lieu de le livrer localement dans /var/spool/mail/root.
+   Ce relais échouait car mail.simpleip.tel n'autorise pas root@sipv-lab comme
+   expéditeur valide, générant un rebond (bounce) qui lui-même repartait par le
+   même chemin cassé.
+   Fix : `postconf -e 'mydestination = $myhostname, localhost.localdomain, localhost'`
+   + `postfix reload`. Vérifié par un envoi de test manuel (`sendmail root`) :
+   `status=sent (delivered to mailbox)` au lieu de `bounced`. Boîte de test locale
+   nettoyée après vérification.
+Aucun fichier de code touché — configuration serveur uniquement
+(`/etc/postfix/main.cf` sur sipv-lab).
+
+### TASK-S042 [~] Fondation multi-serveur SIPV (pas le dispatcheur "classe 4" lui-même)
+Contexte : Philippe a fourni un gros document d'architecture (rédigé avec
+ChatGPT, qui ne connaît pas ~80% de ce qui a été construit ici) proposant entre
+autres plusieurs serveurs SIPV (SIPV01/02/03) avec distribution des tenants et
+un routeur DID central ("classe 4"/SBC). Analyse faite en direct avec Philippe
+(comparaison document vs code réel, pas juste réaction au texte) : ⚠️ ça
+contredisait a priori la décision de cette session de fixer `REG_DOMAIN="sipv"`
+en dur (un seul domaine plat pour tous les tenants). Philippe a clarifié : il
+n'a besoin que d'UN seul serveur aujourd'hui et probablement pour 5-6 ans, mais
+il compte **vendre ce logiciel** — si un futur client a besoin de plusieurs
+serveurs, l'architecture doit être prête. Décision prise ensemble : construire
+la fondation de données MAINTENANT (coût quasi nul, un seul serveur = aucun
+changement de comportement visible), mais **reporter le dispatcheur central
+lui-même** (la vraie pièce technique qui redirigerait les appels/provisioning
+vers le bon serveur) tant qu'un 2e serveur n'est pas réellement provisionné —
+le construire aujourd'hui pour dispatcher entre... un seul serveur n'aurait
+aucune valeur testable.
+
+Fait :
+- `backend/app/models/server.py` (nouveau) — `SipvServer` : name, hostname,
+  ip_address, is_active, notes.
+- `backend/app/models/tenant.py` — `Tenant.server_id` (FK nullable vers
+  `sipv_servers`, `ondelete="SET NULL"`) + relation `server`.
+- Migration `0044_sipv_servers.py` — crée `sipv_servers`, ajoute
+  `tenants.server_id`, **seed automatique** d'un serveur "sipv-lab"
+  (192.168.1.55) et **backfill** de tous les tenants existants dessus (aucun
+  tenant ne se retrouve orphelin après la migration).
+- `backend/app/api/v1/endpoints/servers.py` (nouveau) — CRUD minimal
+  (`GET/POST /servers`, `PUT /servers/{id}`), compte de tenants par serveur.
+- `backend/app/api/v1/endpoints/tenants.py` — `TenantOut` gagne
+  `server_id`/`server_name` ; `create_tenant` assigne automatiquement le
+  premier serveur actif trouvé (comportement "premier trouvé" temporaire — le
+  futur dispatcheur central choisira intelligemment une fois plusieurs
+  serveurs réels en place).
+- `backend/app/main.py` — `include_router(servers.router, prefix="/api/v1/servers")`.
+
+Déployé et testé en direct sur sipv-lab : migration appliquée
+(`0043→0044` OK), service `sipv-backend` redémarré proprement (systemd),
+vérifié directement en base : 1 serveur créé, tenant existant bien rattaché
+(`server_id` non nul).
+
+**Reste à faire (`[~]`)** :
+- Le dispatcheur central lui-même ("classe 4"/SBC/DID Dispatcher — nom pas
+  encore choisi, voir le document de Philippe pour les options de nommage) —
+  reporté explicitement, à construire seulement quand un 2e serveur SIPV sera
+  réellement provisionné.
+- ~~Champ "serveur hébergeur" à afficher côté ERPCRM sur la fiche Compagnie~~ —
+  **mise à jour (2026-08-02, TASK-023.27)** : `sipv_client.get_tenant`/
+  `update_tenant` existent maintenant (ajoutés pour le catalogue d'options
+  téléphonie, TASK-S011.5), donc le blocage technique noté ici n'existe plus.
+  Il reste seulement à afficher `server_name` quelque part sur la fiche
+  Compagnie ERPCRM (pas fait — personne ne l'a demandé encore).
+- Onglet "Serveur" d'ERPCRM (créé vide cette session, TASK-026 côté nav) —
+  cette fondation (liste des serveurs) en sera un des premiers contenus une
+  fois qu'on y reviendra.
+
+### TASK-S043 [ ] Architecture 3 couches (Serveur/Compagnie-Tenant/Contact-Poste) — backlog validé, rien construit
+Philippe a retravaillé l'architecture globale avec ChatGPT (2026-08-02), sur la
+base du premier document analysé pour TASK-S042 mais en beaucoup plus détaillé.
+Objectif de cette entrée : ne pas perdre le résultat de cette réflexion et ne
+pas la reconstruire ou la redemander plus tard. **Rien n'est construit ici** —
+c'est un backlog de référence, validé contre le code réel, en attente de
+priorisation.
+
+**Déjà construit, confirmé aligné avec cette architecture (ne pas dupliquer)** :
+- Héritage "As Template" (valeur absente = hérite du parent) : déjà le
+  mécanisme de `resolve_setting()` (`app/core/settings_resolver.py`), utilisé
+  pour plusieurs champs compagnie→poste (ex. `voicemail_delete_after_email`).
+- Caller ID "As Company" avec override par poste : déjà `Tenant.
+  default_caller_id_name/number` + `SIPExtension.caller_id_name/number`
+  (nullable = hérite), plus `caller_id_internal_*`/`caller_id_external_*`
+  (TASK-018.6).
+- Objets partagés du tenant (IVR, groupes de sonnerie, files, horaires, jours
+  fériés, paging) : déjà des modèles SIPV existants (`ivr.py`, `schedule.py`).
+- E911 : `E911Address` (adresse civique par tenant) + `DID911Assignment`
+  (DID→adresse) existent déjà — gestion manuelle, pas de déclencheur automatique.
+- Catalogue d'options dynamique du poste (TASK-S011.5, commencé le même jour) :
+  même principe que le "+ Ajouter une option" décrit ici, catalogue minimal
+  pour l'instant (langue), extensible.
+- Fondation multi-serveur (TASK-S042) : `SipvServer` + `Tenant.server_id`.
+
+**Pas construit — nouveau, à prioriser plus tard (aucun GO donné)** :
+1. **Global Templates / Model Templates / chaîne d'héritage à 5 niveaux**
+   (défaut système/modèle → template global serveur → Global Policy tenant →
+   template du tenant → template du modèle dans le tenant → poste individuel).
+   Rien de tout ça n'existe. `PhoneButtonTemplate` (TASK-023.25) est le seul
+   embryon de "template" actuel, et il ne couvre que les boutons, pas
+   l'ensemble des paramètres d'un poste.
+2. **Global Policy par tenant** — n'existe pas comme concept séparé, seulement
+   les champs spécifiques déjà présents sur `Tenant` (permissions d'appel,
+   caller ID par défaut).
+3. **Registre 911 déclenché automatiquement** dès qu'un DID sert de Caller ID
+   (compagnie, contact, groupe, file, site) + tableau de bord (nombre de DID
+   affichés/complets/en erreur, taxe municipale 9-1-1 à remettre vs coût
+   technique fournisseur — deux montants distincts, taux historisé par
+   période). Rien de tout ça n'existe ; `E911Address`/`DID911Assignment`
+   actuels sont gérés manuellement, sans déclencheur ni tableau de bord.
+4. **Trunks / Routes entrantes / Routes sortantes en onglets de haut niveau**
+   côté ERPCRM (pas nichés dans la fiche Compagnie). Le backend SIPV a déjà
+   `trunks.py`/`routes.py` séparés, mais côté ERPCRM tout vit actuellement
+   mélangé dans l'onglet Téléphonie de `CompanyDetail.jsx`. Irait
+   naturellement dans l'onglet "Serveur" (créé vide, TASK-026).
+5. **Catalogue de paramètres formalisé** (identifiant technique, type,
+   validation, fabricants/modèles compatibles, dépendances) — on a
+   actuellement juste une liste plate (`PHONE_OPTIONS_CATALOG`), pas cette
+   structure riche.
+   Démarré (2026-08-02, premier item du backlog attaqué) : voir TASK-023.28
+   dans TASKERPCRM.md — uniquement côté ERPCRM (`ref_data.py`), rien touché
+   côté SIPV pour cette étape.
+6. Nettoyage explicitement demandé par Philippe : retirer toute notion propre
+   à l'écosystème Grandstream (Wave, RemoteConnect, GDMS) de cette
+   architecture — n'a jamais été construit ici de toute façon, juste à ne
+   jamais l'introduire par erreur en copiant un concept UCM plus tard.
+
+**Sources** : `/home/simpleip/GrandStream/schema_champs_ucm.md` (relevé complet
+UCM6300A) et `/home/simpleip/Scopserv/SCHEMA~1.MD` (relevé complet ScopTel),
+fournis par Philippe (2026-08-02) comme référence de structure de champs pour
+construire ce catalogue plus tard — jamais de données client réelles dedans.
+Dépend de : TASK-S042 (première ronde d'analyse architecture).
+
+### TASK-S044 [x] Global/Tenant/Model Templates — chaîne d'héritage (item 1 de TASK-S043)
+GO de Philippe (2026-08-02, "go") pour attaquer l'item 1 du backlog TASK-S043
+juste après l'item 5 (TASK-S011.6/TASK-023.28, le catalogue formalisé sur
+lequel cette chaîne s'appuie).
+
+Relu `schema_champs_ucm.md` (lignes 1805-1827, onglet Zero Config de l'UCM
+Grandstream) pour ancrer "Global Templates"/"Model Templates" sur leur vraie
+définition plutôt que d'inventer : **Global Policy** = un seul gabarit
+singleton appliqué à tous les appareils (déjà `Tenant.phone_option_defaults`,
+TASK-S011.5). **Global Templates** = liste nommée de gabarits qui se
+superposent à la Global Policy. **Model Templates** = liste nommée de
+gabarits scopés à un modèle précis, avec un flag **Is Default** (celui
+appliqué automatiquement en l'absence d'assignation explicite), superposés
+au-dessus. Adapté au multi-tenant SIPV : Global Template devient scopé au
+serveur (`SipvServer`, partagé par tous les tenants qu'il héberge) plutôt
+qu'à l'appareil UCM unique ; le reste (Global Policy, Model Template)
+devient scopé au tenant en plus du modèle.
+
+Ordre de fusion retenu (le plus spécifique gagne, même esprit que
+`resolve_setting()`/la fusion TASK-S011.5, juste étendue) :
+défauts système (`PHONE_OPTION_SYSTEM_DEFAULTS`) → `GlobalTemplate`
+(serveur, is_default) → `Tenant.phone_option_defaults` (Global Policy
+tenant) → `TenantTemplate` (tenant, is_default) → `TenantModelTemplate`
+(tenant+modèle, is_default) → `ProvisionedPhone.extra_config` (poste).
+
+Fait (fondation seulement — modèles, migration, moteur de résolution) :
+- 3 nouveaux modèles dans `models/provisioning.py` : `GlobalTemplate`
+  (`server_id`), `TenantTemplate` (`tenant_id`), `TenantModelTemplate`
+  (`tenant_id`+`phone_model_id`) — chacun `name`, `description`, `options`
+  (JSON, mêmes clés que `PHONE_OPTIONS_CATALOG`), `is_default`, `is_active`.
+- Migration `0046_template_inheritance_chain` (3 tables, appliquée sur le
+  serveur réel, `alembic current` confirmé à jour).
+- `get_phone_config` (`provisioning.py`) étendu pour interroger les 3
+  nouvelles tables (filtre `is_default=true, is_active=true`) et les
+  fusionner dans l'ordre ci-dessus.
+- Testé de bout en bout sur le GXP2135 physique réel (t1001-102,
+  `25ed81cf-d6a7-4209-a1a1-39ea108c9a6c`) : baseline `P1362=fr` (Tenant.
+  phone_option_defaults), `TenantTemplate` (language=auto) posé → rendu
+  passe à `auto` (gagne sur la Global Policy tenant), `TenantModelTemplate`
+  (language=fr) posé par-dessus → rendu repasse à `fr` (gagne sur
+  `TenantTemplate`, confirme l'ordre du plus spécifique) — les 3 lignes de
+  test supprimées après coup, aucune donnée réelle laissée modifiée, poste
+  `t1001-102` reconfirmé `Registered` après redémarrage des 2 services
+  (`sipv-backend`, `sipv-backend-tls`).
+
+**CRUD + UI ajoutés le même jour (2026-08-02→03)**, GO de Philippe ("on construit
+cette écran... on choisira le gxp2135") :
+- CRUD complet (list/create/update/delete) pour les 3 niveaux :
+  `provisioning.py` (`/tenant-templates`, `/tenant-model-templates`, tenant_id
+  dans le body/path) et `servers.py` (`/{server_id}/global-templates`,
+  `/global-templates/{id}`) côté SIPV, tous en `get_current_user_or_service`
+  pour le proxy ERPCRM. `list_servers` (servers.py) passé du même
+  `get_current_user` au `get_current_user_or_service` (ERPCRM ne pouvait pas
+  l'appeler avant).
+- Poser `is_default=true` désactive automatiquement le `is_default` existant
+  au même scope (`update(...).where(scope==X).values(is_default=False)` avant
+  l'insert/update) -- couvre le manque `is_default` note plus haut (devient un
+  besoin reel une fois l'UI interactive construite, plus seulement theorique).
+- ERPCRM : `sipv_client.py` (12 nouvelles fonctions), proxy `companies.py`
+  (`/tenant-templates`, `/tenant-model-templates`, scope compagnie -- meme
+  pattern que `button-templates`), nouveau fichier `server.py` (proxy
+  `/servers`, `/servers/{id}/global-templates` -- rien n'existait encore pour
+  la page Serveur), enregistré dans `main.py`.
+- Frontend : `CompanyDetail.jsx` (onglet Téléphonie) → `TenantTemplatesSection`
+  et `TenantModelTemplatesSection` (sélecteur marque/modèle réutilisant le même
+  `Autocomplete` deux-étapes que `ContactDetail.jsx`, 70 modèles Grandstream
+  déjà au catalogue -- confirmé, aucun autre fabricant encore). `Server.jsx`
+  (page vide TASK-026) → liste des serveurs + `GlobalTemplatesSection` par
+  serveur. Chaque template expansible affiche un `PhoneOptionsEditor` (déjà
+  existant, réutilisé tel quel) pour éditer ses `options`.
+- Testé de bout en bout via l'API ERPCRM réelle (pas juste SIPV direct cette
+  fois) : token JWT généré pour l'utilisateur admin réel, `GET
+  /v1/ref/phone-models` confirme GXP2135 présent, `POST .../tenant-model-
+  templates` créé pour la compagnie Simple IP inc. (GXP2135, is_default=true,
+  language=auto) → rendu du poste physique t1001-102 passé de `fr` à `auto` →
+  supprimé via `DELETE` proxy → rendu revenu à `fr`, poste confirmé
+  `Registered` après coup. `npx vite build` (ERPCRM frontend) propre, aucune
+  erreur de compilation.
+- Backend ERPCRM (processus `uvicorn` manuel, pas de service systemd actif
+  actuellement -- `erpcrm-backend`/`erpcrm-backend-tls` systemd restent
+  `inactive`) tué proprement (PID confirmé disparu) et relancé -- healthcheck
+  `/api/health` OK après coup.
+
+Explicitement toujours pas fait (pas de besoin réel, LOI 4) :
+- Aucune assignation explicite d'un template non-`is_default` à un tenant/
+  poste précis (seul le défaut par niveau est automatique). Le même
+  mécanisme "créer puis appliquer" que `PhoneButtonTemplate` (TASK-023.25)
+  pourrait s'y greffer plus tard si demandé.
+- Génération automatique de `config_template` pour un nouveau modèle/marque —
+  chaque modèle a toujours besoin de son propre gabarit Jinja2 écrit à la main
+  (traduction option→code fabricant, ex. `P1362` chez Grandstream) ; la chaîne
+  d'héritage est générique pour tout `PhoneModel` existant, mais rien
+  n'automatise l'ÉCRITURE de ce gabarit pour un modèle qui n'en a pas encore.
+Fichiers : backend/app/models/provisioning.py, models/__init__.py,
+api/v1/endpoints/provisioning.py, api/v1/endpoints/servers.py,
+alembic/versions/0046_template_inheritance_chain.py (SIPV) ;
+backend/app/core/sipv_client.py, api/v1/endpoints/companies.py,
+api/v1/endpoints/server.py (nouveau), main.py, frontend/src/pages/
+CompanyDetail.jsx, frontend/src/pages/Server.jsx (ERPCRM).
+Dépend de : TASK-S043 (item 1), TASK-S011.6/TASK-023.28 (item 5, catalogue).
+
+### TASK-S044.1 [x] Choix explicite des templates + bibliothèque par serveur (correction de placement)
+Corrigé le même jour (2026-08-03) suite au test de l'écran TASK-S044/TASK-027.1
+par Philippe : "Template de tenant" avait été créé DANS Compagnie (donnée
+privée par tenant), pas correct selon son modèle mental de la hiérarchie
+Serveur → Compagnie → Contact ("create template" doit être dans la couche
+supérieure, le CHOIX dans la couche adéquate). Il a aussi demandé un mécanisme
+"as template" par champ (valeur du template affichée avec étiquette
+"(as template)", personnalisable champ par champ, réversible).
+
+Changements structurels :
+- `TenantTemplate.tenant_id` → `server_id` : devient une bibliothèque PAR
+  SERVEUR (comme `GlobalTemplate`), créée/gérée dans Serveur uniquement.
+  Migration `0047_template_explicit_selection` (table vidée avant l'ALTER --
+  seulement 1 ligne de test de Philippe dedans, aucune donnée réelle).
+- Résolution de la chaîne changée de "scan is_default" à référence explicite :
+  `Tenant.selected_tenant_template_id` (nouveau, nullable) et
+  `ProvisionedPhone.selected_tenant_model_template_id` (nouveau, nullable).
+  Si non choisi, le niveau est simplement sauté (pas de devinette). Seul
+  `GlobalTemplate` (niveau serveur) reste automatique via `is_default` --
+  c'est une "policy", pas un choix par compagnie.
+- `TenantModelTemplate` INCHANGÉ (reste créé dans Compagnie, confirmé correct
+  par Philippe) -- seul le mécanisme de sélection devient explicite
+  (`selected_tenant_model_template_id`, choisi dans Contact).
+- CRUD `TenantTemplate` déplacé de `provisioning.py` vers `servers.py`
+  (`GET/POST/PUT/DELETE /servers/{server_id}/tenant-templates`, mémé forme
+  que `global-templates`).
+- `PhoneOptionsEditor.jsx` (composant partagé ERPCRM) réécrit pour le
+  mécanisme "as template" : accepte `templateOptions`/`templateLabel`, affiche
+  automatiquement toute option couverte par le template actif avec l'étiquette
+  "(as template)" (cliquable pour revenir au template une fois personnalisée),
+  en plus des options ajoutées manuellement (`+ Ajouter une option`, inchangé).
+- ERPCRM `Server.jsx` : ajout de `TenantTemplatesSection` (bibliothèque, pas de
+  "Défaut" affiché puisque jamais automatique). `CompanyDetail.jsx` : retiré le
+  CRUD local, ajouté un sélecteur au-dessus de "Options téléphonie (défaut
+  compagnie)". `ContactDetail.jsx` : bloc "Options du poste" + sélecteur de
+  template par modèle déplacé de la section appareil vers entre Renvois et
+  Caller ID (demande explicite de placement). Nouveau endpoint `GET
+  /contacts/{id}/sip-extension/phone/tenant-model-templates` (filtre déjà au
+  modèle du poste, évite d'exposer `companyId` côté Contact).
+
+Testé de bout en bout via l'API ERPCRM réelle (token admin, pas juste SIPV
+direct) sur le GXP2135 physique (t1001-102) : template tenant créé dans
+Serveur → sélectionné dans Compagnie → rendu changé (fr→auto) ; template par
+modèle créé dans Compagnie → sélectionné dans Contact → rendu regagne (auto→fr,
+plus spécifique) ; tout désélectionné/supprimé après coup → rendu revenu à fr
+(baseline), poste confirmé `Registered`. Tables `tenant_templates`/
+`tenant_model_templates`/`global_templates` vides après nettoyage (confirmé
+par requête directe).
+
+Explicitement pas fait : assignation de template non liée à "choisi" (pas de
+liste de templates "disponibles mais non actifs" appliqués partiellement) ;
+mécanisme "as template" pas étendu aux champs Caller ID/Renvois existants
+(nullable columns, mécanisme différent et déjà fonctionnel -- Philippe a
+seulement demandé le PLACEMENT du nouveau bloc à côté, pas la fusion des deux
+mécanismes).
+Fichiers : backend/app/models/provisioning.py, models/tenant.py,
+api/v1/endpoints/provisioning.py, api/v1/endpoints/servers.py,
+api/v1/endpoints/tenants.py, alembic/versions/0047_template_explicit_selection.py
+(SIPV) ; backend/app/core/sipv_client.py, api/v1/endpoints/companies.py,
+api/v1/endpoints/server.py, api/v1/endpoints/contacts.py,
+frontend/src/components/PhoneOptionsEditor.jsx, frontend/src/pages/
+CompanyDetail.jsx, frontend/src/pages/Server.jsx, frontend/src/pages/
+ContactDetail.jsx (ERPCRM).
+Dépend de : TASK-S044.
+
+### TASK-S011.7 [x] Catalogue PhoneModel — 20 marques additionnelles (liste seulement)
+Demande de Philippe (2026-08-03) : liste complète marque/modèle fournie
+(259 entrées, 21 marques dont Alcatel, AudioCodes, Cisco, CyberData,
+CounterPath, Fanvil, FlyingVoice, Grandstream, Hitachi, LG-Ericsson,
+Mitel/Aastra, Panasonic, Polycom, Linksys/Sipura, Snom, Tiptel, Uniden, Voice
+Operator Panel, VTech, Yealink, Other) — explicitement "on ne fait pas les
+code juste la liste" : entrées catalogue seulement, AUCUN `config_template`
+écrit (reste un chantier séparé par modèle, comme déjà pour le GXP2135).
+
+Migration `0048_seed_more_brands` : idempotente (n'insère que les paires
+brand+model absentes, exact match), guard par (brand, model) plutôt que par
+brand seul (les modèles Grandstream de sa liste chevauchaient partiellement
+le catalogue déjà seedé, TASK-023.18/0039 — doublons exacts ignorés, 26
+nouveaux modèles Grandstream réellement ajoutés). `device_type` classé
+UNIQUEMENT par mot-clé explicite dans le nom fourni (Intercom/Softphone/
+Gateway → intercom/softphone/ata), `telephone` par défaut pour tout le reste
+y compris les combinés sans-fil DECT/Wireless — pas de classification basée
+sur une connaissance produit externe non vérifiée (zéro supposition).
+
+Vérifié après coup : 21 marques / 319 modèles au total dans `phone_models`,
+comptes par marque recomptés et confirmés identiques à ceux donnés par
+Philippe (ex. Cisco 31, Yealink 41, Grandstream 96 = 70 déjà là + 26
+nouveaux). Aucun doublon GXP2135. Confirmé visible via `/v1/ref/phone-models`
+(endpoint déjà utilisé par les sélecteurs marque/modèle côté ERPCRM). Poste
+t1001-102 reconfirmé `Registered` après la migration.
+Fichiers : backend/alembic/versions/0048_seed_more_brands.py.
+Dépend de : TASK-023.18 (catalogue Grandstream initial).
+
+### TASK-S011.8 [x] Pack vocal français FreeSWITCH + lien avec la langue du poste
+Demande de Philippe (2026-08-03) : installer le pack de voix française pour
+FreeSWITCH (annonces boîte vocale/IVR — distinct de P1362, la langue
+d'affichage du téléphone) et lier les deux pour qu'ils suivent le même choix.
+
+Vérifié avant d'agir (zéro supposition) : sur le serveur réel, seul le pack
+anglais (`en/us/callie`) était installé. Pack officiel FreeSWITCH pour le
+français canadien identifié via le Makefile source
+(`/usr/src/freeswitch-1.10.12`) : `sounds-fr-ca-june` (voix "June", 8kHz,
+version 1.0.51) — pas `fr-fr`, le seul pack français officiel disponible est
+canadien, cohérent avec la clientèle Simple IP.
+
+Fait :
+- `sudo make sounds-fr-install` exécuté sur le serveur réel (télécharge depuis
+  `files.freeswitch.org`, installe sous `/usr/local/freeswitch/sounds/fr/ca/june/`)
+  — confirmé présent après coup.
+- `xml_curl.py` (`_user_xml`) : nouvelle table `_LANGUAGE_PROMPT_MAP` (`fr` →
+  fr/ca/june, `en` → en/us/callie), pose `default_language`/`default_dialect`/
+  `default_voice`/`sound_prefix` par poste selon `Tenant.phone_option_defaults
+  ["language"]` (même clé que le catalogue TASK-S011.5/S011.6/P1362). "auto"
+  ou absent → aucune variable posée, le défaut global (`en/us/callie`,
+  `vars.xml`) s'applique tel quel.
+- Portée volontairement limitée au niveau **Tenant** (déjà chargé dans
+  `_handle_directory`, zéro requête supplémentaire) — PAS la chaîne complète à
+  5 niveaux (TASK-S044) : ce endpoint est appelé à CHAQUE REGISTER/INVITE
+  authentifié (chemin sensible à la performance), et personne n'a encore
+  demandé de précision par poste pour les annonces vocales (contrairement au
+  texte affiché à l'écran, où TASK-S044 reste la source de vérité).
+
+Testé en direct sur le tenant réel (t1001) : `default_language=fr` confirmé
+dans la réponse XML directory pour t1001-102 avec `phone_option_defaults=
+{"language":"fr"}` ; basculé à `"auto"` → aucune variable posée (confirmé) ;
+remis à `"fr"` (baseline restaurée). Poste `t1001-102` resté `Registered`
+tout au long du test.
+
+Catalogue ERPCRM (`ref_data.py`) : choix `en` (Anglais) ajouté à l'option
+`language` — confiance moindre que `fr`/`auto` (déduit par analogie avec le
+changelog Grandstream GXW42xx, aucune légende P1362 officielle trouvée pour
+la famille GXP2130/40/60/70/35 elle-même — voir TASK-023.28 pour le détail).
+
+Explicitement pas fait : résolution complète à 5 niveaux pour les annonces
+vocales (voir portée ci-dessus) ; autres langues (zh/es existent dans
+l'écosystème P-code Grandstream mais aucun pack vocal FreeSWITCH correspondant
+installé, aucun besoin réel exprimé).
+Fichiers : backend/app/api/v1/endpoints/xml_curl.py (SIPV, code) ; pack sons
+installé hors dépôt git (fichiers binaires sur le serveur uniquement).
+Dépend de : TASK-S011.5/S011.6 (catalogue "language").
+
+### TASK-S010.3 [x] UI Succursales (911 multi-site) — ERPCRM
+Demande de Philippe (2026-08-03) : "succursale" pour avoir plusieurs sites
+dans le même tenant, permettant plusieurs adresses 911. Vérifié avant de
+construire quoi que ce soit : la fondation existait déjà en ENTIER côté SIPV
+depuis TASK-S010/TASK-S010.2 — `E911Address` n'a jamais été limité à une
+seule adresse par tenant (déjà un `label` par adresse, ex. "Bureau
+principal"), et `ExtensionE911Assignment` lie déjà chaque poste à UNE adresse
+au choix. Il ne manquait AUCUNE pièce de données, seulement l'UI côté ERPCRM
+(confirmé par grep : zéro référence à `E911Address`/`e911` dans le frontend
+ERPCRM avant cette tâche).
+
+Fait :
+- `e911.py` (SIPV) : les 15 endpoints passés de `get_current_user` à
+  `get_current_user_or_service` (même conversion que `tenants.py`/
+  `servers.py` plus tôt) pour permettre le proxy ERPCRM.
+- `sipv_client.py` : 8 nouvelles fonctions (adresses + assignation par poste).
+- `companies.py` : proxy `/{company_id}/e911-addresses[...]` (CRUD complet,
+  "Succursales").
+- `contacts.py` : `GET /{contact_id}/sip-extension/911/addresses` (liste
+  filtrée au tenant du poste, pas besoin de `companyId` côté Contact — même
+  pattern que TASK-S044.1) ; `GET/PUT/DELETE /{contact_id}/sip-extension/911`
+  (upsert — le frontend n'a pas à savoir si une assignation existe déjà).
+- `CompanyDetail.jsx` (Téléphonie) : `E911AddressesSection` — liste/créer/
+  modifier/supprimer des succursales (nom + adresse civique complète).
+- `ContactDetail.jsx` : section "911 — localisation d'urgence" (entre Caller
+  ID et Plan d'appel) — sélection de succursale + étage/bureau/précision/
+  courriel d'alerte.
+
+Testé de bout en bout via l'API ERPCRM réelle (token admin) sur la vraie
+compagnie/le vrai poste : succursale créée, listée via l'endpoint Contact,
+assignée au poste, mise à jour (même ligne réutilisée, pas de doublon —
+confirmé par requête directe SIPV), assignation et succursale supprimées,
+tables `e911_addresses`/`extension_911_assignments` vides après coup. Poste
+t1001-102 resté `Registered`. `npx vite build` propre.
+
+Explicitement pas fait (aucun besoin exprimé) : validation d'adresse auprès
+d'un fournisseur (`is_validated`/`carrier_reference` existent déjà comme
+champs, pas de flux d'automatisation) ; lien DID↔911 (existe déjà séparément,
+`DID911Assignment`, non touché ici, portait déjà sur les DID pas les postes).
+Fichiers : backend/app/api/v1/endpoints/e911.py (SIPV) ;
+backend/app/core/sipv_client.py, api/v1/endpoints/companies.py,
+api/v1/endpoints/contacts.py, frontend/src/pages/CompanyDetail.jsx,
+frontend/src/pages/ContactDetail.jsx (ERPCRM).
+Dépend de : TASK-S010, TASK-S010.2.
+
+### TASK-S044.2 [x] Templates choisissables PLUSIEURS a la fois + visibilite du Global dans Compagnie
+Demande de Philippe (2026-08-03), en testant TASK-S044.1 : il avait créé
+"Global Français" (Défaut) et "Global Anglais" (orphelin, aucun mécanisme de
+choix à ce niveau) — a demandé de pouvoir CHOISIR un ou PLUSIEURS Global
+Templates en plus de celui automatique, que ce choix soit visible dans les
+"Options téléphonie" de la Compagnie, et le même principe partout : "celui
+par défaut ET un autre qui ajoute l'oreillette ET un autre qui ajoute des
+boutons de park" — des templates qui SE COMBINENT, pas juste un choix parmi
+plusieurs.
+
+Migration `0049_template_multi_select` : les 3 FK simples (un seul choix)
+converties en tableaux UUID (plusieurs choix, fusionnés dans l'ordre du
+tableau — le dernier gagne en cas de clé en commun) :
+- `Tenant.selected_tenant_template_id` → `selected_tenant_template_ids`
+- `Tenant.selected_global_template_ids` (NOUVEAU — Global Templates
+  supplémentaires choisis par la compagnie, en PLUS de celui `is_default`
+  qui reste automatique/"policy")
+- `ProvisionedPhone.selected_tenant_model_template_id` → `..._ids`
+Pas de contrainte FK Postgres sur les éléments de tableau (même esprit que
+`blocked_countries`/`blocked_prefixes` déjà dans le projet) — intégrité gérée
+côté application.
+
+Ordre de fusion (`get_phone_config`) : système → GlobalTemplate is_default
+(auto) → GlobalTemplate(s) supplémentaires choisis (dans l'ordre du tableau)
+→ Global Policy tenant (`phone_option_defaults`) → TenantTemplate(s) choisis
+→ TenantModelTemplate(s) choisis → poste. Chaque niveau peut maintenant
+empiler plusieurs templates.
+
+Frontend : les 3 `<select>` à choix unique remplacés par des listes de cases
+à cocher (Serveur reste inchangé — c'est là qu'on les crée). `CompanyDetail.jsx`
+calcule maintenant `effectiveTemplateOptions` (fusion de TOUT ce qui est
+au-dessus de `phone_option_defaults` : Global auto + Global choisis + Tenant
+choisis) et le passe à `PhoneOptionsEditor` — le Global automatique est donc
+maintenant VISIBLE ("as template") même sans aucune sélection, répond
+directement à "si il est par défaut l'afficher dans le template de
+compagnie". Nouveau `GET /companies/{id}/global-templates` (miroir de
+`tenant-templates`) pour lister les Global disponibles côté Compagnie.
+
+Testé de bout en bout sur le vrai GXP2135 avec les VRAIS templates de
+Philippe : "Global Anglais" (non-défaut) sélectionné en supplément → n'a PAS
+changé le rendu tant que `phone_option_defaults` (plus spécifique) contenait
+déjà `fr` (comportement CORRECT, pas un bug — confirmé en vidant
+temporairement `phone_option_defaults` : "Global Anglais" a alors bien gagné
+sur "Global Français" par défaut). Même vérification au niveau poste avec un
+template de test (créé/assigné/confirmé/supprimé). Tout remis à l'état
+d'origine après coup — les 2 vrais templates de Philippe (Global Français/
+Anglais, Français/Anglais tenant) laissés intacts, aucune donnée de test
+résiduelle. Poste t1001-102 resté `Registered` tout du long.
+
+Explicitement pas fait : "oreillette"/"boutons de park" ne sont PAS des
+options réelles du catalogue (`PHONE_OPTIONS_CATALOG` n'a toujours qu'une
+seule option, `language`) — rien inventé pour faire une démo, ces exemples
+de Philippe décrivent l'usage prévu une fois le catalogue enrichi (chantier
+séparé, ajouter ces options quand le besoin réel se présente).
+Fichiers : backend/app/models/tenant.py, models/provisioning.py,
+api/v1/endpoints/tenants.py, api/v1/endpoints/provisioning.py,
+alembic/versions/0049_template_multi_select.py (SIPV) ;
+backend/app/api/v1/endpoints/companies.py, api/v1/endpoints/contacts.py,
+frontend/src/pages/CompanyDetail.jsx, frontend/src/pages/ContactDetail.jsx
+(ERPCRM).
+Dépend de : TASK-S044.1.
+
+### TASK-S023.29 [x] UI Boîte vocale (checkbox activer + options) — gap complet trouvé
+Demande de Philippe (2026-08-03) : en appelant le poste 100, "messagerie
+vocale activée" affiché mais impossible à désactiver ; voulait une checkbox
+qui, une fois cochée, révèle les options de boîte vocale (mot de passe, etc.).
+
+Vérifié avant de coder (zéro supposition) : gap total confirmé côté ERPCRM
+(zéro référence à `VoicemailBox` dans tout le frontend) — la ligne
+"Activée/Désactivée" était un texte en LECTURE SEULE, jamais éditable.
+Encore plus révélateur : le poste 100 avait `voicemail_enabled=true` en DB
+mais AUCUNE ligne `VoicemailBox` (seuls 101/102 en avaient, créées
+manuellement pendant des tests antérieurs, jamais via une UI) — le drapeau
+disait "activée" mais rien de fonctionnel n'existait derrière.
+
+Fait :
+- `voicemail.py` : 5 endpoints (list/create/update/delete + le get_global déjà
+  là) passés à `get_current_user_or_service`. ⚠️ Bug trouvé en testant le
+  DELETE via clé de service : `user.email` encore utilisé sans garde dans
+  `delete_voicemail` (les autres l'avaient déjà) → `AttributeError` (500)
+  quand appelé sans JWT utilisateur. Corrigé (`user.email if user else
+  "erpcrm-service"`), même pattern que les autres endpoints.
+- `sipv_client.py` (ERPCRM) : 4 fonctions (list/create/update/delete).
+- `contacts.py` (ERPCRM) : `SipExtensionUpdate.voicemail_enabled` ajouté (la
+  checkbox elle-même) ; `GET/PUT/DELETE /{contact_id}/sip-extension/voicemail`
+  (upsert -- le frontend n'a pas à savoir si la boîte existe déjà ; DELETE =
+  `is_active=false`, PAS une suppression réelle -- réversible).
+- `ContactDetail.jsx` : checkbox "Boîte vocale activée" (remplace le texte en
+  lecture seule) ; cochée → révèle courriel, NIP, 3 cases à cocher (courriel
+  par nouveau message, joindre le fichier audio, sauter les instructions
+  parlées). Cocher pour la première fois crée la boîte tout de suite
+  (mailbox = numéro de poste, nom = nom du contact). Section positionnée
+  juste avant DND (placement demandé explicitement).
+
+**Révisé le même jour** (retour de Philippe après avoir vu l'écran) :
+- NIP boîte vocale rendu directement visible/éditable (retiré le pattern
+  "vide = inchangé" copié par réflexe d'ailleurs dans le projet où il est
+  justifié -- mots de passe SIP chiffrés, mot de passe admin téléphone). Ici
+  non justifié : `VoicemailBox.password` est DÉJÀ stocké en clair (jamais
+  chiffré nulle part dans `voicemail.py`) -- c'est un NIP composé au clavier
+  du téléphone (convention Asterisk/FreeSWITCH mod_voicemail), pas un mot de
+  passe de connexion. `VoicemailOut.password` ajouté (jamais fait pour les
+  autres secrets du projet -- délibérément différent ici, la donnée
+  sous-jacente n'a jamais été un secret protégé).
+- Section déplacée : elle vivait après Renvois/Caller ID/911 (placement par
+  défaut, pas demandé) ; déplacée juste avant DND (haut de la fiche,
+  placement explicitement demandé cette fois).
+
+Testé de bout en bout via l'API réelle sur le VRAI poste 100 : désactivé,
+réactivé, boîte créée (mailbox="100", fullname="Test Un" auto-déduit),
+courriel + mot de passe modifiés (mot de passe confirmé changé en DB),
+désactivée (confirmé `is_active=false`, pas supprimée), puis supprimée pour
+de vrai (donnée de test) et `voicemail_enabled` remis à son état d'origine
+(`true`). Poste physique t1001-102 resté `Registered` tout du long.
+`npx vite build` propre.
+
+Explicitement pas fait (aucun besoin exprimé) : gestion des messages/
+transcription/salutations (greetings) — endpoints déjà tout faits côté SIPV
+mais aucune UI, `max_messages`/`max_message_length`/`language` (avancé, pas
+demandé).
+Fichiers : backend/app/api/v1/endpoints/voicemail.py (SIPV) ;
+backend/app/core/sipv_client.py, api/v1/endpoints/contacts.py,
+frontend/src/pages/ContactDetail.jsx (ERPCRM).
+
+### TASK-S023.31 [~] Bug critique BV corrigé (domain_name jamais posé) + accueil upload/download
+Philippe a appelé le vrai poste 100 (2026-08-04) : ça sonne, tombe sur la BV,
+dit "the person at extension... goodbye!" et raccroche -- **pas de bip, pas
+moyen de laisser un message**. Aussi signalé : poste jamais annoncé par son
+nom, et voulait un endroit pour télécharger/uploader le message d'accueil.
+
+**Cause racine trouvée dans les vrais logs FreeSWITCH** (zéro supposition) :
+`voicemail(default  t1001-100)` -- double espace = `${domain_name}` VIDE au
+moment d'appeler l'app `voicemail`. Confirmé par la suite du log : joue
+seulement `vm-person.wav` puis `vm-goodbye.wav` et raccroche -- exactement le
+comportement d'échec de `mod_voicemail` quand il ne peut pas localiser le
+compte (pas de nom personnalisé, pas de bip, pas d'enregistrement possible).
+
+`domain_name` n'était posé NULLE PART avant les 6 appels à l'app `voicemail`
+dans `xml_curl.py`, sauf un endroit (routage DID entrant) qui le posait à la
+mauvaise valeur (`REG_DOMAIN` = constante générique `"sipv"`, pas le domaine
+réel du tenant). Corrigé aux 5 endroits qui touchent le flux normal d'un
+poste (*97, *98+poste, DND, **le chemin exact qu'il a testé** -- sonne, pas
+de réponse, tombe sur BV -- et routage DID entrant) : `<action
+application="set" data="domain_name={tenant.account_number}"/>` posé juste
+avant chaque appel à `voicemail`. PAS corrigé : les options "voicemail" dans
+un menu IVR (`_ivr_option_action`) -- même bug latent probable, mais hors du
+chemin qu'il testait, pas touché pour rester ciblé sur le problème signalé.
+
+Vérifié après coup (dialplan régénéré pour le poste 100 réel) : le XML
+contient maintenant bien `<action application="set" data="domain_name=t1001"/>`
+juste avant `voicemail(default ${{domain_name}} t1001-100)`. **Limite
+honnête** : je ne peux pas placer un vrai appel depuis cet environnement --
+la correction est vérifiée structurellement (le bon XML est généré, cause
+racine confirmée par les logs), mais PAS reconfirmée par un vrai appel qui
+laisse effectivement un message. Philippe doit retester en direct.
+
+Accueil (greeting) upload/download/suppression -- l'infrastructure
+(conversion ffmpeg vers WAV 8kHz mono, déjà en place côté SIPV) existait mais
+aucune UI : `voicemail.py` (3 endpoints passés à `get_current_user_or_
+service`) ; `sipv_client.py` (3 fonctions, dont le transfert multipart) ;
+`contacts.py` (`POST/GET/DELETE /{{contact_id}}/sip-extension/voicemail/
+greeting`, scope au type "unavailable" -- celui joué quand personne ne
+répond, le cas exact signalé ; les types busy/name/temp existent côté SIPV
+mais pas exposés ici, pas demandés) ; `ContactDetail.jsx` (section dans
+"Boîte vocale" : indicateur présent/absent, télécharger, envoyer un fichier
+audio -- n'importe quel format, conversion automatique).
+
+Testé de bout en bout via l'API réelle sur la vraie boîte du poste 100 :
+fichier WAV de test envoyé (converti correctement, 8kHz mono confirmé),
+téléchargé (contenu WAV valide confirmé), supprimé (fichier disparu du
+disque confirmé). Poste t1001-102 resté `Registered` tout du long.
+
+[~] volontairement : la cause du bug "pas de bip/pas de message" est
+identifiée et corrigée avec de bonnes preuves (logs réels + XML régénéré
+correct), mais reste à confirmer par un vrai appel de Philippe avant de
+marquer [x].
+Fichiers : backend/app/api/v1/endpoints/xml_curl.py, voicemail.py (SIPV) ;
+backend/app/core/sipv_client.py, api/v1/endpoints/contacts.py,
+frontend/src/pages/ContactDetail.jsx (ERPCRM).
+
+### TASK-S023.32 [x] Suite TASK-S023.31 : annonce dit "100" pas "t1001-100" + sonneries + auto-save
+Philippe a retesté et signalé 3 choses (2026-08-04) :
+
+1. **L'annonce générique disait le username SIP complet** ("t1001-100") au
+   lieu du numéro de poste ("100"). Cause : les actions `voicemail()`
+   passaient `ext.username` comme mailbox, pas `ext.extension`. Corrigé aux 4
+   endroits concernés (`_forward_action_xml`, DND, timeout de sonnerie,
+   routage DID entrant). ⚠️ Ce changement cassait la recherche interne de
+   `mod_voicemail` (action=voicemail-lookup, qui envoie maintenant "100" au
+   lieu de "t1001-100") -- ajouté un repli dans `_handle_directory` : si le
+   lookup par username échoue ET que c'est cette action précise ET qu'un
+   tenant est déjà résolu par le domaine, réessaye par numéro d'extension nu
+   scopé à ce tenant. Jamais actif pour un vrai REGISTER (qui envoie toujours
+   le username complet, matche déjà avant ce repli). Testé en direct : lookup
+   `user=100&domain=t1001&action=voicemail-lookup` retrouve bien le bon
+   compte ; lookup normal `user=t1001-102` inchangé ; poste `Registered`.
+
+2. **Bouton "Enregistrer" de la BV semblait ne rien faire.** Vérifié dans les
+   logs ERPCRM + la DB : les PUT partaient bien et étaient bien sauvegardés
+   (courriel de Philippe confirmé en base) -- le vrai problème était l'absence
+   totale de retour visuel. Remplacé par sauvegarde automatique par champ
+   (courriel/NIP au `onBlur`, cases à cocher au `onChange`) avec le même
+   indice bleu que `PhoneOptionsEditor` (TASK demande du 2026-08-04) -- plus
+   de bouton groupé, plus de confusion possible.
+
+3. **"Nombre de sonneries avant messagerie" introuvable dans la section
+   Boîte vocale.** Le champ existe déjà (`forward_no_answer_delay_seconds`,
+   SIPExtension) mais son UI n'apparaissait que si un renvoi explicite était
+   configuré (`forward_no_answer_enabled`) -- jamais pour le cas simple
+   (`voicemail_enabled` seul) qui est pourtant le seul câblé chez lui. Ajouté
+   directement dans la section Boîte vocale, exprimé en NOMBRE DE SONNERIES
+   (pas en secondes) -- conversion basée sur la cadence réelle configurée sur
+   ce serveur (`vars.xml`, `us-ring=%(2000,4000,...)` = 2s son + 4s silence =
+   6s/sonnerie, vérifié, pas inventé). 20s par défaut = ~3 sonneries, cohérent
+   avec son observation initiale ("ça sonne 4 coups").
+
+Fichiers : backend/app/api/v1/endpoints/xml_curl.py (SIPV) ;
+frontend/src/pages/ContactDetail.jsx (ERPCRM).
+Dépend de : TASK-S023.31.
+
+### TASK-S023.33 [x] Layout Boîte vocale + indice bleu invisible + NIP par défaut configurable
+Suite de retours de Philippe (2026-08-04) sur l'écran juste construit :
+
+1. **Champs "Sonneries"/"NIP" gigantesques** — ils partageaient `.ifields-grid`
+   (2 colonnes égales) avec Courriel, qui a besoin d'être large. Remplacé par
+   une rangée flex avec largeurs explicites (Sonneries 64px, NIP 120px,
+   Courriel prend le reste).
+2. **Indice bleu de sauvegarde invisible** — cause réelle : réseau local
+   souvent <50ms, le bleu apparaissait et disparaissait plus vite qu'un
+   rafraîchissement d'écran perceptible. Durée minimum garantie (400ms)
+   ajoutée à `PhoneOptionsEditor.jsx` ET au formulaire BV (même bug latent
+   aux deux endroits, corrigé aux deux).
+3. **NIP jusqu'à 8 caractères** (la plupart en auront 4) — `maxLength=20`
+   ajouté (limite réelle de la colonne DB, pas arbitraire), largeur du champ
+   élargie en conséquence.
+4. **NIP par défaut des nouvelles BV, configurable** — nouveau champ
+   `TelephonySettings.voicemail_default_password` (migration
+   `0050_vm_default_password`, nullable = comportement précédent inchangé,
+   NIP aléatoire 4 chiffres). `create_voicemail` : NIP fourni explicitement >
+   NIP par défaut configuré > aléatoire (dernier recours). Section "Boîte
+   vocale — réglages globaux" ajoutée dans **Serveur** (ERPCRM) — c'est un
+   singleton `TelephonySettings`, pas un réglage par `SipvServer`, donc rendu
+   une seule fois en haut de la page, pas par serveur. `get_current_user` →
+   `get_current_user_or_service` sur `/global-settings` (SIPV) pour permettre
+   le proxy.
+
+Testé : réglage global lu (`null` au départ) → réglé à "8123" (valeur donnée
+par Philippe) → relu, confirmé persisté. Poste t1001-102 resté `Registered`.
+`npx vite build` propre.
+Fichiers : backend/app/models/settings.py, api/v1/endpoints/voicemail.py,
+alembic/versions/0050_vm_default_password.py (SIPV) ;
+backend/app/core/sipv_client.py, api/v1/endpoints/server.py,
+frontend/src/components/PhoneOptionsEditor.jsx,
+frontend/src/pages/ContactDetail.jsx, frontend/src/pages/Server.jsx (ERPCRM).
+Dépend de : TASK-S023.32.
+
+### TASK-S040.1 [ ] Softphone SimpleIP pour ordinateur (compagnon du mobile TASK-S040)
+Demande de Philippe (2026-08-02), en même temps que la discussion d'architecture
+ci-dessus : en plus de l'app mobile (TASK-S040), construire **aussi** un
+téléphone logiciel pour ordinateur (desktop). Pas urgent, juste noter le
+besoin pour plus tard — mêmes contraintes que TASK-S040 (SRTP obligatoire,
+connexion "conventionnelle" par username complet, pas de champ domaine séparé
+à comprendre par l'usager). Plateforme/techno pas encore scopée (Electron ?
+app native Windows/Mac ? — à décider en même temps que TASK-S040 vu que les
+deux partageront probablement la même logique SIP/SRTP sous-jacente).
+Dépend de : TASK-S040 (même recherche de librairie SIP à faire une fois pour les deux).
+
 ### TASK-S040 [ ] App SIP mobile maison (softphone dédié SimpleIP)
 Demande de l'utilisateur (2026-07-24), après avoir buté sur une incompatibilité SRTP
 probable avec Zoiper (v2.10.20.4) en testant la connexion à distance depuis un
@@ -2512,3 +4026,332 @@ Fichiers : sipv/backend/app/api/v1/endpoints/trunks.py,
 api/v1/endpoints/xml_curl.py (+ script ponctuel de création DB, supprimé du serveur
 après exécution). Config serveur (hors git) : `/usr/local/freeswitch/conf/vars.xml`,
 `sip_profiles/external.xml`, `sip_profiles/external/t1001-gw-1e083163.xml`.
+
+### TASK-S045 [x] Sync succursale (E911Address) + DID (TenantDID) depuis ERPCRM maître, ouverture des horaires en proxy
+Pendant SIPV de TASK-023.30/TASK-023.31 (TASKERPCRM.md) -- voir ces entrées pour le
+détail complet côté ERPCRM (modèles, UI, drag-and-drop). Ici seulement ce qui a changé
+côté SIPV : ERPCRM devient maître pour `CompanySite`→`E911Address` et `DID`→`TenantDID`,
+même patron bloquant que `sync_company` déjà en place.
+
+Fait :
+- `models/e911.py` : `E911Address.erpcrm_site_id` (UUID, unique, nullable).
+- `models/sip.py` : `TenantDID.erpcrm_did_id` (UUID, unique, nullable) et
+  `TenantDID.schedule_id` (FK `schedules.id`, `SET NULL`).
+- `api/v1/endpoints/sync.py` : `POST /site` (upsert par `erpcrm_site_id`), `POST /did`
+  (upsert par `erpcrm_did_id`, sinon adopte une ligne existante avec le même `number` --
+  évite les doublons pendant la bascule des DID déjà présents).
+- `api/v1/endpoints/dids.py` : `DELETE /{did_id}` passe de `get_current_user` à
+  `get_current_user_or_service` pour qu'ERPCRM puisse supprimer réellement le miroir
+  SIPV quand un DID est supprimé côté ERPCRM (avant : suppression impossible depuis
+  ERPCRM, mirroir orphelin). `DESTINATION_TYPES` étendu (`fax`, `conference`,
+  `transfer`, `message`).
+- `api/v1/endpoints/schedules.py` : tous les endpoints (list/create/update/delete
+  schedule, add/delete rule, list/create/delete holiday, check_is_open) passés de
+  `get_current_user` à `get_current_user_or_service` (aucun n'utilisait le contenu de
+  `user`, changement sûr) -- ERPCRM les proxy directement sans session utilisateur SIPV.
+  Réutilise les modèles `Schedule`/`ScheduleRule`/`Holiday` déjà existants mais jamais
+  utilisés (`models/schedule.py`) -- aucun nouveau modèle créé.
+- Migrations `0051_e911_erpcrm_site_id` → `0052_tenant_did_erpcrm_id` →
+  `0053_tenant_did_schedule_id`, appliquées sur le serveur distant.
+
+Testé : sync succursale et DID vérifiés de bout en bout via l'API ERPCRM réelle (voir
+TASK-023.30/.31), `alembic upgrade head` confirmé à `0053` sur le serveur distant,
+`sipv-backend.service`/`sipv-backend-tls.service` redémarrés et `/api/health` vérifié
+après chaque lot de déploiement (pas après chaque fichier individuel).
+Fichiers : backend/app/models/e911.py, models/sip.py,
+api/v1/endpoints/sync.py, dids.py, schedules.py,
+alembic/versions/0051_e911_erpcrm_site_id.py → 0053_tenant_did_schedule_id.py.
+Dépend de : TASK-S010.3, TASK-023.30/.31 (TASKERPCRM.md).
+
+### TASK-S045.1 [x] Destination par plage horaire (ScheduleRule) + endpoint d'édition manquant
+Pendant SIPV de TASK-023.31.1 (TASKERPCRM.md) -- voir cette entrée pour le
+détail complet (UI, tests). Ici seulement le changement côté SIPV.
+
+Fait :
+- `models/schedule.py` : `ScheduleRule` += `destination_type`, `destination`
+  (String(20)/String(100), nullable -- meme forme que `TenantDID`). Migration
+  `0054_schedule_rule_destination.py`.
+- `schedules.py` : `RuleOut`/`RuleCreate` transportent les 2 nouveaux champs ;
+  nouveau `RuleUpdate` + `PUT /rules/{rule_id}` -- avant cette entrée, une
+  règle ne pouvait qu'être créée ou supprimée, jamais modifiée en place, ce
+  qui aurait forcé un delete+recreate côté ERPCRM pour le moindre changement.
+  `/{sched_id}/is-open` renvoie maintenant aussi `destination_type`/
+  `destination` de la règle qui matche (pas encore consommé nulle part --
+  `xml_curl.py::_is_schedule_open` garde sa propre logique binaire dupliquée
+  pour les ring groups, TASK-023.9, non touchée par cette entrée).
+
+Testé : bout en bout via l'API ERPCRM réelle (voir TASK-023.31.1). Migration
+appliquée sur le serveur distant (`alembic upgrade head` → `0054`),
+`sipv-backend.service`/`sipv-backend-tls.service` redémarrés, `/api/health`
+vérifié après coup.
+Fichiers : backend/app/models/schedule.py, api/v1/endpoints/schedules.py,
+alembic/versions/0054_schedule_rule_destination.py.
+Dépend de : TASK-S045, TASK-023.31.1 (TASKERPCRM.md).
+
+### TASK-S023.15.1 [x] Groupe de pickup nommé (PickupGroup) -- créer le groupe puis assigner les postes
+Pendant SIPV de TASK-023.19.1 (TASKERPCRM.md) -- voir cette entrée pour le
+détail complet (UI, tests). Ici seulement le changement côté SIPV.
+
+Fait :
+- `models/sip.py` : nouveau modèle `PickupGroup` (tenant_id, name, is_active)
+  -- entité purement organisationnelle, **le dialplan (*8,
+  `xml_curl.py::_pickup_dialplan_entries`, TASK-023.15, déjà en prod)
+  continue de matcher par `SIPExtension.pickup_group` (string) -- non
+  touché**, ce modèle sert seulement à pouvoir créer un groupe vide et le
+  renommer/supprimer en masse sur ses membres, au lieu de dépendre d'au moins
+  un poste taggé pour que le groupe "existe".
+- `extensions.py` : `GET/POST /pickup-groups/tenant/{tenant_id}`,
+  `PUT/DELETE /pickup-groups/{group_id}` -- renommer met à jour
+  `SIPExtension.pickup_group` sur tous les membres (le nom EST la clé de
+  matching côté dialplan) ; supprimer retire le tag (`None`) de tous les
+  membres avant de supprimer la ligne, jamais de tag orphelin.
+- Migration `0055_pickup_groups.py`.
+- Endpoint existant `PUT /{ext_id}` (déjà TASK-023.22, `get_current_user_or_
+  service`, `ExtUpdate` avec `pickup_group`/`can_intercept_calls`) inchangé
+  -- réutilisé tel quel pour assigner/retirer un poste et le "Peut
+  intercepter".
+
+⚠️ Latent trouvé en testant (pas corrigé, hors scope de cette demande) :
+`ExtUpdate.can_intercept_calls: bool | None` accepte `None` mais la colonne
+DB est `NOT NULL` (`Boolean, default=True`) -- envoyer explicitement `null`
+plante en 500 (IntegrityError) au lieu d'un 422 propre. Aucun appelant actuel
+(ERPCRM inclus) n'envoie jamais `null` pour ce champ, donc pas de risque en
+usage normal ; à corriger si ça revient (retirer `| None` ou ignorer les
+`None` explicites pour ce champ précis dans `update_extension`).
+
+Testé : bout en bout via l'API ERPCRM réelle (voir TASK-023.19.1). Migration
+appliquée sur le serveur distant, services redémarrés, `/api/health` vérifié.
+Fichiers : backend/app/models/sip.py, models/__init__.py,
+api/v1/endpoints/extensions.py, alembic/versions/0055_pickup_groups.py.
+Dépend de : TASK-S023.15, TASK-023.19.1 (TASKERPCRM.md).
+
+#### TASK-S057 [ ] Provisioning -- SIP transport (TLS/TCP) jamais poussé dans la config XML du téléphone
+
+Découvert par l'utilisateur (2026-08-11) en testant un appel bidirectionnel
+102↔103 : le 103 (GXP2170, poste réel de l'utilisateur, compte 3) ne
+recevait pas d'appels entrants tant que son "SIP Transport" restait en UDP
+(config héritée de son ancien UCM). Une fois changé manuellement en TLS/TCP
+sur le téléphone, les appels fonctionnent dans les deux sens.
+
+Cause : `SIPExtension.transport` existe déjà en base (`tls` par défaut,
+`extensions.py`), mais **rien dans le générateur de provisioning
+(`api/v1/endpoints/provisioning.py`) ne pousse ce champ dans le XML de
+config du téléphone** -- confirmé, aucune référence à un P-value de
+transport SIP (ex: P1667 chez Grandstream) dans ce fichier. Chaque
+téléphone doit donc être configuré à la main pour le bon transport au lieu
+que le provisioning s'en charge automatiquement.
+
+Pas commencé. Reste à faire : ajouter le P-value de transport SIP (à
+confirmer selon modèle -- GXP2135/GXP2170 potentiellement différents) au
+générateur de provisioning, alimenté par `SIPExtension.transport`.
+
+#### TASK-S058 [x] Bug -- Hold GXP2170/GXP2135 raccrochait l'appel au lieu de le mettre en attente (rejet SRTP sur re-INVITE)
+
+Testé par l'utilisateur avec un vrai appel bidirectionnel 103 (GXP2170,
+compte 3, poste réel) ↔ 102 (GXP2135) -- une fois le problème de transport
+(TASK-S057) réglé, l'appel fonctionne des deux côtés, MAIS appuyer sur
+Hold sur le GXP2170 raccrochait l'appel au lieu de le mettre en attente.
+Hypothèse initiale (touche Hold mal mappée / config héritée de l'ancien
+UCM) **infirmée** par un `sofia siptrace` capturé pendant un vrai appel :
+le GXP2170 envoie un re-INVITE de Hold parfaitement standard (`a=sendonly`),
+mais FreeSWITCH le **rejette avec `488 Not Acceptable Here`**
+(`Crypto not negotiated but required` / `Reinvite resulted in codec
+negotiation failure`, `switch_core_media.c:5604`) parce que l'offre SDP du
+Hold ne réoffre aucune ligne `a=crypto`, alors que `rtp_secure_media` était
+forcé à `mandatory` pour TOUTES les extensions sans exception
+(`xml_curl.py`, `_user_xml`). Reproduit à l'identique sur le GXP2135 (102)
+-- donc pas un problème spécifique au GXP2170, ni une config héritée de
+l'ancien UCM.
+
+**Corrigé** : ajout de la variable directory `execute_on_answer` =
+`set:rtp_secure_media=optional`, qui ne s'applique qu'une fois l'appel
+répondu (le SRTP reste `mandatory`, donc obligatoire, pour ÉTABLIR
+l'appel) -- les renégociations SDP ultérieures (Hold, etc.) acceptent le
+SRTP s'il est réoffert, sans l'exiger. Mécanisme natif FreeSWITCH
+(`switch_channel.c:3896`, `SWITCH_CHANNEL_EXECUTE_ON_ANSWER_VARIABLE`),
+aucun patch du code source FreeSWITCH.
+
+⚠️ Incident pendant le déploiement (corrigé dans la foulée) : le premier
+correctif incluait un commentaire XML explicatif dans le XML `<variables>`
+retourné par `_user_xml` -- un commentaire XML ne peut jamais contenir
+`--`, ce que ce commentaire faisait (utilisé comme tiret de ponctuation),
+ce qui rendait le XML de la réponse `directory` invalide
+(`switch_xml.c:1797`, `unclosed <!--`) et a fait échouer TOUS les REGISTER
+(tous les postes "down") jusqu'au correctif (commentaire retiré du XML
+émis, gardé seulement en commentaire Python au-dessus). Backend redémarré
+et validé (`/api/health` + re-registration confirmée) après le correctif.
+
+Fichiers : `backend/app/api/v1/endpoints/xml_curl.py` (`_user_xml`).
+Déployé directement sur le serveur (`/home/sipv/sipv/...`) -- **⚠️ ce
+dépôt local et le serveur ont un écart important** (dépôt local très en
+retard sur ce qui tourne réellement, voir `git status` -- à réconcilier
+un jour, hors scope de cette tâche).
+
+##### TASK-S058.1 [x] Keep-alive NAT serveur aligné sur les téléphones (20s)
+
+Demande de l'utilisateur après coup : les téléphones Grandstream ont un
+"Keep-Alive Interval" par défaut à 20s (paquet de garde NAT côté client),
+mais FreeSWITCH n'envoyait aucun ping NAT de son côté
+(`nat-options-ping` et `all-reg-options-ping` étaient commentés dans le
+profil sofia `internal`). Activé `nat-options-ping=true` +
+`ping-mean-interval=20` dans
+`/usr/local/freeswitch/conf/sip_profiles/internal.xml` (fichier serveur
+manuel, pas généré par SIPV, pas dans ce dépôt) pour que FreeSWITCH
+rafraîchisse aussi le mapping NAT du routeur toutes les 20s, en phase avec
+les téléphones. XML validé (`xml.dom.minidom`) avant application cette
+fois -- backup du fichier pris avant modif. `reloadxml` +
+`sofia profile internal restart` appliqués, `102`/`103` confirmés toujours
+enregistrés et `Ping-Status: Reachable` après coup.
+
+##### TASK-S058.2 [x] Kamailio (SBC, TASK-S039) jamais validé avec vrais téléphones -- 3 bugs trouvés et corrigés
+
+Session de test réelle (2026-08-11/12, 102/103 physiques) : le cutover
+Kamailio du 2026-07-23 (TASK-S039) n'avait jamais été testé avec un vrai
+appel/audio (documenté explicitement comme hors scope à l'époque). Trois
+bugs distincts trouvés en conditions réelles :
+
+1. **Coupure d'appel automatique après ~32s** -- `ext-sip-ip` du profil
+   `internal` (FreeSWITCH) pointait encore vers l'IP publique externe
+   (`142.112.42.52`, via `$${external_sip_ip}`), alors que ce profil
+   écoute maintenant en loopback (`sip-ip=127.0.0.1`) derrière Kamailio.
+   Le téléphone recevait donc un `Contact` externe dans le `200 OK`, son
+   ACK partait vers cette IP publique (confirmé : Kamailio le relayait
+   bien là, mais rien n'y écoute), FreeSWITCH ne recevait jamais l'ACK,
+   retransmettait le `200 OK` ~10x puis abandonnait (`408 ACK Timeout`)
+   après ~32s pile. Diagnostiqué avec siptrace FreeSWITCH + `journalctl`
+   Kamailio (`corex.debug 4` en direct, sans redémarrage) croisés sur le
+   même Call-ID. Corrigé : `ext-sip-ip` retiré du profil `internal`
+   uniquement (`external`/trunks gardent l'IP publique, inchangé) --
+   FreeSWITCH retombe sur `sip-ip=127.0.0.1`, que Kamailio sait relayer.
+2. **`auth-calls` du profil `internal` jamais réellement actif** --
+   référençait `$${internal_auth_calls}`, jamais défini dans `vars.xml`
+   (résolvait vide/false). Sans authentification challengée sur les
+   INVITE entrants (pas juste le REGISTER), FreeSWITCH ne faisait jamais
+   de requête `directory` pour peupler les variables custom
+   (`hold_music`, `effective_caller_id_name`, etc.) sur le canal
+   APPELANT -- cause du mauvais nom affiché ET du MOH par défaut joué au
+   lieu de celui du tenant selon qui faisait le Hold. Corrigé : ajout de
+   `internal_auth_calls=true` dans `vars.xml`.
+3. **Voix silencieuse au début de CHAQUE appel jusqu'au premier Hold** --
+   plusieurs fausses pistes explorees avant la vraie cause (port RTP qui
+   change = normal, `rtp_secure_media=optional` = pas la cause principale
+   meme si passe a `forbidden` en cours de route). VRAIE CAUSE, prouvee de
+   facon definitive : **rtpengine reecrit le SDP et alloue ses PROPRES
+   ports media**, jamais annonces par FreeSWITCH -- confirme avec
+   `rtpengine-ctl list sessions <call-id>` montrant un port (ex: `30516`)
+   alloue par rtpengine cote telephone, absent de tous les logs
+   FreeSWITCH. Contredit la doc du 2026-07-23 (TASK-S039) qui disait
+   `rtpengine_manage()` desactive/jamais teste avec audio reel -- l'appel
+   etait pourtant bien ACTIF dans `kamailio.cfg` au moment de cette
+   session (le daemon `rtpengine-daemon.service` tourne depuis un reboot
+   du 2026-08-11 06h58, mais QUAND le script Kamailio a commence a
+   l'appeler reellement n'est pas confirme -- possiblement des la
+   migration meme, mal redocumente). Corrige : `rtpengine_manage()`
+   recommente dans `kamailio.cfg` (backup pris), retour au media direct
+   telephone<->FreeSWITCH. `kamailio -c -f ...` valide avant restart du
+   service. Note pour tout debug audio futur sur ce serveur : toujours
+   verifier `rtpengine-ctl list sessions all` en premier reflexe --
+   composant facile a oublier puisqu'il n'apparait dans aucun log
+   FreeSWITCH.
+
+Tous ces fichiers (`internal.xml`, `vars.xml`, `kamailio.cfg`) sont des
+fichiers SERVEUR manuels, PAS générés par SIPV, PAS dans ce dépôt --
+backups pris avant chaque modif (`.bak-<date>`), XML validé avant chaque
+`reloadxml`/restart de profil.
+
+##### TASK-S058.3 [x] MOH -- mauvais fichier sélectionné pour le tenant + reprise de position par appel en cours
+
+Découvert en même temps : le fichier MOH qui jouait ("Arianne", une voix,
+pas de la musique) n'était PAS un bug SIP -- c'est `test_moh_24k` (fichier
+de test, même ID que les phrases-prompt 24kHz testées plus tôt) qui était
+sélectionné (`TenantMohSelection`) pour le tenant au lieu de "decontract"
+(le vrai MOH voulu). Corrigé en base + `regenerate_tenant_moh_stream()`
+rappelé -- "decontract" joue maintenant.
+
+Comportement de reprise MOH demandé : le MOH doit garder sa position PAR
+APPEL EN COURS -- si on remet en Hold plusieurs fois le même appel, ça
+reprend où c'était rendu (pas depuis le début à chaque fois), mais un
+NOUVEL appel repart toujours à zéro. Chaque poste doit avoir son propre
+suivi, indépendant des autres.
+
+Vérifié dans le code source FreeSWITCH (`switch_core_media.c`,
+`switch_ivr.c`) avant de coder quoi que ce soit : aucune mémoire de
+position native -- chaque Hold relance `switch_ivr_broadcast()` depuis
+le début, l'Unhold arrête juste le broadcast sans rien sauvegarder.
+Mécanisme de contournement identifié et PROUVÉ manuellement en direct
+(postes 102/103, `uuid_setvar`/`uuid_getvar`) avant tout code :
+- FreeSWITCH pose `playback_last_offset_pos` sur le canal qui JOUE la
+  MOH (le partenaire du poste qui a fait Hold) dès que la lecture
+  s'arrête, normale ou interrompue (`switch_ivr_play_say.c:2014`,
+  inconditionnel).
+- L'application `playback::` accepte `fichier.wav@@<sample>` pour
+  reprendre exactement à cette position (`mod_dptools`).
+- `hold_music` est relu dynamiquement à chaque nouveau Hold -- le
+  mettre à jour entre deux Hold suffit à faire reprendre le suivant au
+  bon endroit.
+- Test manuel : Hold ~10s, lecture de `playback_last_offset_pos` sur le
+  partenaire (147680), ré-application via `uuid_setvar` sur le poste en
+  Hold, nouveau Hold -- reprise exacte confirmée par l'utilisateur.
+
+Automatisé dans `app/core/moh_hold_tracker.py` (nouveau service, démarré
+dans le `lifespan` de `main.py` à côté du client ESL existant) : une
+connexion ESL dédiée (event stream, lecture seule, différente de la
+connexion commande/réponse partagée `get_esl()`) écoute `CHANNEL_HOLD` /
+`CHANNEL_UNHOLD` / `CHANNEL_HANGUP_COMPLETE`. Le partenaire est lu
+directement depuis le header `Other-Leg-Unique-ID` de l'événement
+(confirmé présent en direct via une sonde ESL avant de coder). État
+gardé en mémoire, keyé par UUID du poste qui fait Hold -- jamais
+persisté : un nouvel appel = nouveaux UUID = aucune entrée = repart à
+zéro, sans code supplémentaire pour ce cas.
+
+Limite connue et acceptée : en mode Liste (plusieurs pistes chaînées
+via `file_string`), si un cycle de Hold dépasse la durée du fichier en
+cours, FreeSWITCH n'expose aucun moyen de savoir quel fichier de la
+chaîne était ouvert à l'arrêt -- la reprise suivante cible le même
+fichier avec l'offset lu. En mode Aléatoire (un seul fichier par appel),
+ce cas ne se produit pas. Échec silencieux en cas de valeur
+incohérente : l'appel retombe sur le comportement par défaut (recommence
+au début), jamais une lecture corrompue.
+
+Point mineur connu, sans impact fonctionnel : `sipv-backend` tourne en
+plusieurs workers uvicorn, donc le tracker démarre une fois par worker
+(2 connexions ESL dédiées vues dans `ss -tnp`) -- redondant (les deux
+calculent le même résultat) mais pas incorrect.
+
+Testé et confirmé par l'utilisateur en direct (postes 102/103, plusieurs
+cycles Hold/Unhold consécutifs sur le même appel) : la MOH reprend
+progressivement où elle était rendue à chaque Hold, et un nouvel appel
+repart bien à zéro.
+
+##### TASK-S058.4 [x] MOH -- `local_stream://` retiré, remplacé par `file_string://` (réinitialisation à zéro à chaque appel)
+
+Bug architectural : `hold_music` pointait vers `local_stream://{tenant}`
+(flux continu partagé, pensé pour une "radio IP" -- rejoint toujours en
+cours de lecture, ne redémarre jamais à zéro). Ça faussait tout le
+troubleshooting Hold précédent (TASK-S058/S058.1/S058.2) : le problème
+"la MOH ne redémarre pas à zéro sur un nouvel appel" persistait malgré
+tous les fix SIP/crypto/kamailio, parce que la config MOH elle-même
+était la mauvaise architecture depuis le départ.
+
+Fix dans `xml_curl.py` (`_user_xml`) : `hold_music` construit maintenant
+en lisant directement les fichiers `.wav` du dossier
+`MOH_SOUNDS_BASE/{domain}/` (déjà synchronisé par
+`regenerate_tenant_moh_stream()`, triés par préfixe numérique =
+`sort_order`) et en chaînant via `file_string://` (redémarre bien à
+zéro à chaque `playback()`, vérifié dans le code source FreeSWITCH).
+Mode liste (`moh_shuffle=False`) : chaîne tous les fichiers dans l'ordre.
+Mode aléatoire (`moh_shuffle=True`) : un seul fichier choisi au hasard,
+re-tiré à chaque REGISTER. Le `silence_stream://500!` de tête (0.5s,
+TASK antérieure) est conservé devant la chaîne.
+`local_stream://` n'est plus utilisé nulle part pour `hold_music`.
+
+Déployé et vérifié par curl direct sur `/api/v1/xml_curl` (section
+directory, REGISTER t1001-102) : `hold_music` retourne bien
+`file_string://silence_stream://500!/usr/local/freeswitch/sounds/sipv_moh/t1001/000_....wav`,
+fichier confirmé lisible par l'utilisateur `freeswitch`.
+Confirmé par test réel sur téléphone (2 appels distincts, chacun mis en
+Hold séparément) : la MOH repart du tout début à chaque fois, aucune
+reprise d'un appel à l'autre.
+
+Reprise de position par appel en cours = toujours TASK-S058.3, non
+implémenté, distinct de ce fix.

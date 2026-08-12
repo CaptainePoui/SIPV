@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 from app.core.database import get_db
-from app.api.v1.endpoints.auth import get_current_user
+from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
 from app.models.e911 import E911Address, DID911Assignment, ExtensionE911Assignment
 from app.models.user import User
 
@@ -78,13 +78,13 @@ def _addr_out(a: E911Address) -> AddressOut:
 # ── E911 Addresses ────────────────────────────────────────────────────────────
 
 @router.get("/addresses/tenant/{tenant_id}", response_model=list[AddressOut])
-async def list_addresses(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def list_addresses(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(E911Address).where(E911Address.tenant_id == tenant_id).order_by(E911Address.label))
     return [_addr_out(a) for a in result.scalars().all()]
 
 
 @router.post("/addresses/tenant/{tenant_id}", response_model=AddressOut, status_code=status.HTTP_201_CREATED)
-async def create_address(tenant_id: uuid.UUID, payload: AddressCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def create_address(tenant_id: uuid.UUID, payload: AddressCreate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     a = E911Address(tenant_id=tenant_id, **payload.model_dump())
     db.add(a)
     await db.commit()
@@ -93,7 +93,7 @@ async def create_address(tenant_id: uuid.UUID, payload: AddressCreate, db: Async
 
 
 @router.put("/addresses/{addr_id}", response_model=AddressOut)
-async def update_address(addr_id: uuid.UUID, payload: AddressUpdate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def update_address(addr_id: uuid.UUID, payload: AddressUpdate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(E911Address).where(E911Address.id == addr_id))
     a = result.scalar_one_or_none()
     if not a:
@@ -106,7 +106,7 @@ async def update_address(addr_id: uuid.UUID, payload: AddressUpdate, db: AsyncSe
 
 
 @router.delete("/addresses/{addr_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_address(addr_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def delete_address(addr_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(E911Address).where(E911Address.id == addr_id))
     a = result.scalar_one_or_none()
     if not a:
@@ -117,8 +117,34 @@ async def delete_address(addr_id: uuid.UUID, db: AsyncSession = Depends(get_db),
 
 # ── DID 911 Assignments ───────────────────────────────────────────────────────
 
+class DIDLinkOut(BaseModel):
+    tenant_did_id: uuid.UUID | None
+    number: str
+    assignment: AssignmentOut | None
+
+
+@router.get("/assignments/by-did-number/{tenant_id}", response_model=DIDLinkOut)
+async def get_assignment_by_did_number(tenant_id: uuid.UUID, number: str, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    """Trouve le TenantDID de ce tenant par numero (ERPCRM ne connait que le
+    numero, pas l'id SIPV) et retourne son assignation 911 si elle existe --
+    permet a ERPCRM de suggerer/lier l'adresse 911 du DID assigne a un poste."""
+    from app.models.sip import TenantDID
+    did_result = await db.execute(select(TenantDID).where(TenantDID.tenant_id == tenant_id, TenantDID.number == number))
+    did = did_result.scalar_one_or_none()
+    if not did:
+        return DIDLinkOut(tenant_did_id=None, number=number, assignment=None)
+    assign_result = await db.execute(select(DID911Assignment).where(DID911Assignment.did_id == did.id))
+    x = assign_result.scalar_one_or_none()
+    assignment = None
+    if x:
+        assignment = AssignmentOut(id=x.id, tenant_id=x.tenant_id, did_id=x.did_id,
+                                   e911_address_id=x.e911_address_id, emergency_trunk_id=x.emergency_trunk_id,
+                                   alert_email=x.alert_email, is_active=x.is_active)
+    return DIDLinkOut(tenant_did_id=did.id, number=number, assignment=assignment)
+
+
 @router.get("/assignments/tenant/{tenant_id}", response_model=list[AssignmentOut])
-async def list_assignments(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def list_assignments(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(DID911Assignment).where(DID911Assignment.tenant_id == tenant_id))
     return [AssignmentOut(id=x.id, tenant_id=x.tenant_id, did_id=x.did_id,
                           e911_address_id=x.e911_address_id, emergency_trunk_id=x.emergency_trunk_id,
@@ -127,7 +153,7 @@ async def list_assignments(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_
 
 
 @router.post("/assignments/tenant/{tenant_id}", response_model=AssignmentOut, status_code=status.HTTP_201_CREATED)
-async def create_assignment(tenant_id: uuid.UUID, payload: AssignmentCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def create_assignment(tenant_id: uuid.UUID, payload: AssignmentCreate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     # Enforce one address per DID
     existing = await db.execute(select(DID911Assignment).where(DID911Assignment.did_id == payload.did_id))
     if existing.scalar_one_or_none():
@@ -142,7 +168,7 @@ async def create_assignment(tenant_id: uuid.UUID, payload: AssignmentCreate, db:
 
 
 @router.put("/assignments/{assign_id}", response_model=AssignmentOut)
-async def update_assignment(assign_id: uuid.UUID, payload: AssignmentCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def update_assignment(assign_id: uuid.UUID, payload: AssignmentCreate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(DID911Assignment).where(DID911Assignment.id == assign_id))
     x = result.scalar_one_or_none()
     if not x:
@@ -157,7 +183,7 @@ async def update_assignment(assign_id: uuid.UUID, payload: AssignmentCreate, db:
 
 
 @router.delete("/assignments/{assign_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_assignment(assign_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def delete_assignment(assign_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(DID911Assignment).where(DID911Assignment.id == assign_id))
     x = result.scalar_one_or_none()
     if not x:
@@ -195,13 +221,13 @@ def _ext_assign_out(x: ExtensionE911Assignment) -> ExtAssignmentOut:
 
 
 @router.get("/extension-assignments/tenant/{tenant_id}", response_model=list[ExtAssignmentOut])
-async def list_extension_assignments(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def list_extension_assignments(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(ExtensionE911Assignment).where(ExtensionE911Assignment.tenant_id == tenant_id))
     return [_ext_assign_out(x) for x in result.scalars().all()]
 
 
 @router.get("/extension-assignments/by-extension/{extension_id}", response_model=ExtAssignmentOut)
-async def get_extension_assignment(extension_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def get_extension_assignment(extension_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(ExtensionE911Assignment).where(ExtensionE911Assignment.extension_id == extension_id))
     x = result.scalar_one_or_none()
     if not x:
@@ -210,7 +236,7 @@ async def get_extension_assignment(extension_id: uuid.UUID, db: AsyncSession = D
 
 
 @router.post("/extension-assignments/tenant/{tenant_id}", response_model=ExtAssignmentOut, status_code=status.HTTP_201_CREATED)
-async def create_extension_assignment(tenant_id: uuid.UUID, payload: ExtAssignmentCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def create_extension_assignment(tenant_id: uuid.UUID, payload: ExtAssignmentCreate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     existing = await db.execute(select(ExtensionE911Assignment).where(ExtensionE911Assignment.extension_id == payload.extension_id))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Ce poste a déjà une adresse 911 assignée")
@@ -222,7 +248,7 @@ async def create_extension_assignment(tenant_id: uuid.UUID, payload: ExtAssignme
 
 
 @router.put("/extension-assignments/{assign_id}", response_model=ExtAssignmentOut)
-async def update_extension_assignment(assign_id: uuid.UUID, payload: ExtAssignmentCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def update_extension_assignment(assign_id: uuid.UUID, payload: ExtAssignmentCreate, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(ExtensionE911Assignment).where(ExtensionE911Assignment.id == assign_id))
     x = result.scalar_one_or_none()
     if not x:
@@ -235,7 +261,7 @@ async def update_extension_assignment(assign_id: uuid.UUID, payload: ExtAssignme
 
 
 @router.delete("/extension-assignments/{assign_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_extension_assignment(assign_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def delete_extension_assignment(assign_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     result = await db.execute(select(ExtensionE911Assignment).where(ExtensionE911Assignment.id == assign_id))
     x = result.scalar_one_or_none()
     if not x:
@@ -245,7 +271,7 @@ async def delete_extension_assignment(assign_id: uuid.UUID, db: AsyncSession = D
 
 
 @router.get("/extensions-without-911/tenant/{tenant_id}")
-async def extensions_without_911(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def extensions_without_911(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     """Postes actifs sans adresse 911 assignee -- alerte de conformite (miroir de dids-without-911)."""
     from app.models.sip import SIPExtension
     all_ext = await db.execute(select(SIPExtension.id, SIPExtension.extension).where(
@@ -258,7 +284,7 @@ async def extensions_without_911(tenant_id: uuid.UUID, db: AsyncSession = Depend
 
 
 @router.get("/dids-without-911/tenant/{tenant_id}")
-async def dids_without_911(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def dids_without_911(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     """Returns list of DID IDs that have no 911 assignment — useful for compliance alerts."""
     from app.models.sip import TenantDID
     all_dids = await db.execute(select(TenantDID.id, TenantDID.did_number).where(TenantDID.tenant_id == tenant_id))

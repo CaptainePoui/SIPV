@@ -29,6 +29,9 @@ class VoicemailBox(Base):
     # Asterisk options
     say_cid: Mapped[bool] = mapped_column(Boolean, default=True)
     say_duration: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Saute les instructions parlees natives de mod_voicemail ("apres le bip...") --
+    # va direct accueil -> bip (TASK-023.29, demande explicite utilisateur)
+    skip_instructions: Mapped[bool] = mapped_column(Boolean, default=False)
     max_messages: Mapped[int] = mapped_column(Integer, default=100)
     max_message_length: Mapped[int] = mapped_column(Integer, default=300)  # secondes (5 min, TASK-S008.2)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

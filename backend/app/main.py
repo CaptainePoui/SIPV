@@ -3,14 +3,17 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.esl import esl_startup, esl_shutdown
+from app.core.moh_hold_tracker import hold_tracker_startup, hold_tracker_shutdown
 import app.models
-from app.api.v1.endpoints import auth, tenants, extensions, commit, sync, trunks, dids, routes, ivr, voicemail, cdr, e911, provisioning, recordings, fax, sms, security, webhooks, schedules, esl, xml_curl, audit
+from app.api.v1.endpoints import auth, tenants, extensions, commit, sync, trunks, dids, routes, ivr, voicemail, cdr, e911, provisioning, recordings, fax, sms, security, webhooks, schedules, esl, xml_curl, audit, servers, prompts, moh
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await esl_startup()
+    await hold_tracker_startup()
     yield
+    await hold_tracker_shutdown()
     await esl_shutdown()
 
 
@@ -52,6 +55,9 @@ app.include_router(schedules.router, prefix="/api/v1/schedules", tags=["schedule
 app.include_router(esl.router, prefix="/api/v1/esl", tags=["esl"])
 app.include_router(xml_curl.router, prefix="/api/v1/xml_curl", tags=["xml_curl"])
 app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
+app.include_router(servers.router, prefix="/api/v1/servers", tags=["servers"])
+app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["prompts"])
+app.include_router(moh.router, prefix="/api/v1/moh", tags=["moh"])
 
 
 @app.get("/api/health")

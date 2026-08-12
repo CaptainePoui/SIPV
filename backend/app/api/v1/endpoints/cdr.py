@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
 from pydantic import BaseModel
 from app.core.database import get_db
-from app.api.v1.endpoints.auth import get_current_user
+from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
 from app.models.cdr import CDR, RatePrefix
 from app.models.tenant import Tenant
 from app.models.user import User
@@ -53,7 +53,15 @@ async def ingest_cdr(request: Request, db: AsyncSession = Depends(get_db)):
         for child in var_block:
             variables[child.tag] = child.text
 
-    domain = variables.get("sip_from_host") or variables.get("domain_name") or ""
+    # TASK-S049 : `domain_name` est fixe explicitement par NOTRE dialplan sur chaque
+    # branche (voir xml_curl.py, `set domain_name={account}`) -- signal fiable et
+    # authoritatif pour identifier le tenant. `sip_from_host` est une valeur SIP brute
+    # calculee par FreeSWITCH qui peut valoir l'IP externe DU SERVEUR (Ext-SIP-IP) pour
+    # un appel sortant achemine via un trunk/gateway, pas le domaine du tenant -- observe
+    # en production (CDR perdus avec domaine = IP publique du serveur). `domain_name`
+    # doit donc etre tente EN PREMIER, `sip_from_host` seulement en filet de secours pour
+    # d'eventuels evenements qui precederaient notre dialplan.
+    domain = variables.get("domain_name") or variables.get("sip_from_host") or ""
     result = await db.execute(select(Tenant).where(Tenant.account_number == domain))
     tenant = result.scalar_one_or_none()
     if not tenant:
@@ -250,8 +258,9 @@ async def list_cdr(
     disposition: str | None = Query(None),
     date_from: datetime | None = Query(None),
     date_to: datetime | None = Query(None),
+    extension: str | None = Query(None, description="TASK-S055 : filtre sur src OU dst (numéro nu, ex: '101') -- portail Mon poste"),
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User | None = Depends(get_current_user_or_service),
 ):
     filters = [CDR.tenant_id == tenant_id]
     if direction:
@@ -262,6 +271,9 @@ async def list_cdr(
         filters.append(CDR.start_time >= date_from)
     if date_to:
         filters.append(CDR.start_time <= date_to)
+    if extension:
+        from sqlalchemy import or_
+        filters.append(or_(CDR.src == extension, CDR.dst == extension))
 
     total_res = await db.execute(select(func.count()).select_from(CDR).where(and_(*filters)))
     total = total_res.scalar_one()
