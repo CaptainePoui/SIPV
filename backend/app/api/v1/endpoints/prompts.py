@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.esl import get_esl, ESLClient
 from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
@@ -22,13 +23,13 @@ router = APIRouter()
 # Meme convention que UPLOAD_DIR de voicemail.py (TASK-S023.16) -- chemin absolu
 # du serveur ou tourne reellement le service (/home/sipv/sipv/backend, pas la
 # copie locale sur ERPCRM, voir TASKSIPV.md TASK-S018.3).
-UPLOAD_DIR = Path("/home/sipv/sipv/backend/uploads/audio_prompts")
+UPLOAD_DIR = Path(settings.APP_DIR) / "backend/uploads/audio_prompts"
 
 # TASK-S055/TASK-029.2 : cache lisible par le process freeswitch (conf/ appartient
 # a freeswitch:freeswitch, sipv ne peut pas y creer d'entree -- dossier cree
 # manuellement une fois : sudo mkdir + chown sipv:sipv + chmod 755, PAS persistant
 # via code/migration, voir TASKSIPV.md TASK-029.7).
-PROMPT_CACHE_DIR = Path("/usr/local/freeswitch/conf/prompts_cache")
+PROMPT_CACHE_DIR = Path(settings.FREESWITCH_DIR) / "conf/prompts_cache"
 
 
 class AudioPromptOut(BaseModel):

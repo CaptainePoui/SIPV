@@ -7,6 +7,12 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     # Network — change these when migrating servers
     SIPV_HOST: str = "192.168.1.55"
+    # Racines de chemins (TASK-031) -- tous les chemins absolus du code (uploads,
+    # cache FreeSWITCH, certs, etc.) sont derives de ces 2 racines, jamais codes
+    # en dur individuellement -- demenager ce serveur = changer seulement ces 2
+    # lignes (+ SIPV_HOST/SIPV_PUBLIC_IP ci-dessous).
+    APP_DIR: str = "/home/sipv/sipv"
+    FREESWITCH_DIR: str = "/usr/local/freeswitch"
     SIPV_PUBLIC_IP: str = "142.112.42.52"  # IP publique -- utilisee comme outbound proxy pour les postes (fonctionne local + distant via hairpin NAT)
     ERPCRM_HOST: str = "192.168.1.9"
     ERPCRM_API_URL: str = "https://192.168.1.9:8011"

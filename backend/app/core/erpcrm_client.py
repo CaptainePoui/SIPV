@@ -12,7 +12,7 @@ logger = logging.getLogger("erpcrm_client")
 # CA privee ERPCRM<->SIPV (TASK-039 TLS inter-serveurs) -- verifie le certificat du
 # port TLS dedie d'ERPCRM (8011), distinct du port HTTP existant (8010, inchange,
 # reste utilise par le frontend).
-_CA_PATH = "/home/sipv/sipv/backend/certs/ca.pem"
+_CA_PATH = f"{settings.APP_DIR}/backend/certs/ca.pem"
 
 
 def _headers() -> dict:

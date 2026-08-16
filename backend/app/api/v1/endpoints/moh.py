@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
 from pydantic import BaseModel
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.esl import get_esl, ESLClient
 from app.api.v1.endpoints.auth import get_current_user_or_service
@@ -20,7 +21,7 @@ router = APIRouter()
 
 # Meme convention que prompts.py (TASK-S046) -- chemin absolu du serveur ou
 # tourne reellement le service.
-UPLOAD_DIR = Path("/home/sipv/sipv/backend/uploads/moh_files")
+UPLOAD_DIR = Path(settings.APP_DIR) / "backend/uploads/moh_files"
 
 # TASK-S055/TASK-029.2 (meme pattern que prompts.py) : /home/sipv/ est en 750,
 # freeswitch (autre utilisateur) ne peut pas y traverser -- confirme en direct
@@ -28,7 +29,7 @@ UPLOAD_DIR = Path("/home/sipv/sipv/backend/uploads/moh_files")
 # lisible individuellement, la traversee du dossier parent bloquait tout).
 # Dossier cree manuellement une fois : sudo mkdir + chown sipv:sipv + chmod 755,
 # PAS persistant via code/migration.
-MOH_CALL_CACHE_DIR = Path("/usr/local/freeswitch/conf/moh_call_cache")
+MOH_CALL_CACHE_DIR = Path(settings.FREESWITCH_DIR) / "conf/moh_call_cache"
 
 
 class MohFileOut(BaseModel):

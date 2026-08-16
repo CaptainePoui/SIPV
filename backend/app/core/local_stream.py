@@ -19,14 +19,15 @@ import shutil
 from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from app.core.config import settings
 from app.models.tenant import Tenant
 from app.models.moh import MohFile, TenantMohSelection
 
 logger = logging.getLogger("local_stream")
 
-LOCAL_STREAM_INCLUDE_DIR = Path("/usr/local/freeswitch/conf/local_stream")
-MOH_SOUNDS_BASE = Path("/usr/local/freeswitch/sounds/sipv_moh")
-MOH_UPLOAD_DIR = Path("/home/sipv/sipv/backend/uploads/moh_files")
+LOCAL_STREAM_INCLUDE_DIR = Path(settings.FREESWITCH_DIR) / "conf/local_stream"
+MOH_SOUNDS_BASE = Path(settings.FREESWITCH_DIR) / "sounds/sipv_moh"
+MOH_UPLOAD_DIR = Path(settings.APP_DIR) / "backend/uploads/moh_files"
 
 
 def moh_stream_name(account_number: str) -> str:

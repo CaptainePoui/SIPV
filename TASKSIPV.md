@@ -979,12 +979,33 @@ par les logs FreeSWITCH réels : Ring-Ready → answered → playback →
 Fichiers : `backend/app/api/v1/endpoints/prompts.py`.
 Dépend de : TASK-S055, TASK-S055.1, TASK-S055.3.
 
-#### TASK-S056 [ ] Audit config centralisée -- éliminer les IPs/chemins codés en dur restants
+#### TASK-S056 [x] Audit config centralisée -- éliminer les IPs/chemins codés en dur restants
 
-Lien TASKERPCRM : TASK-031 (détail complet côté ERPCRM). Côté SIPV,
-exemple déjà trouvé : `UPLOAD_DIR`/`PROMPT_CACHE_DIR` dans `prompts.py`
-sont des chemins absolus codés en dur, pas dans `settings`/`.env`. Pas
-commencé.
+Lien TASKERPCRM : TASK-031 (détail complet côté ERPCRM). Fait le 2026-08-16
+(session autonome, GO global de Philippe) -- audit complet des IPs codées en
+dur : aucune trouvée côté ERPCRM (déjà propre). Côté SIPV, 13 chemins
+absolus codés en dur trouvés à travers 6 fichiers, tous éliminés :
+- `config.py` -- 2 nouvelles racines : `APP_DIR` (`/home/sipv/sipv`) et
+  `FREESWITCH_DIR` (`/usr/local/freeswitch`) -- déménager ce serveur = changer
+  seulement ces 2 lignes (+ `SIPV_HOST`/`SIPV_PUBLIC_IP` déjà existants)
+- `voicemail.py`, `moh.py`, `prompts.py` -- `UPLOAD_DIR` dérivé de `APP_DIR`,
+  `MOH_CALL_CACHE_DIR`/`PROMPT_CACHE_DIR` dérivés de `FREESWITCH_DIR`
+- `xml_curl.py` -- `PROMPT_DIR`/`_RECORDINGS_DIR` idem
+- `core/local_stream.py` -- `LOCAL_STREAM_INCLUDE_DIR`/`MOH_SOUNDS_BASE`/
+  `MOH_UPLOAD_DIR` idem
+- `core/erpcrm_client.py` -- `_CA_PATH` idem
+- `workers/backup_runner.py` -- 2 entrées `CONFIG_PATHS` idem (déjà
+  partiellement centralisé via `BACKEND_DIR` dynamique, complété pour
+  cohérence)
+
+Vérifié AVANT déploiement : toutes les valeurs calculées comparées aux
+littéraux d'origine (assert Python) -- identiques, aucun changement de
+comportement. Backend redémarré, `sipv-backend`/`-tls` actifs. Non touchés
+volontairement : `/etc/kamailio/kamailio.cfg` et `/etc/freeswitch/vars.xml`
+(chemins d'installation standard des paquets système, pas vraiment
+variables même après un déménagement de serveur -- pas de sur-ingénierie
+pour un cas qui n'arrive pas en pratique).
+Commit + push directement depuis SIPV (`git@github.com:CaptainePoui/SIPV.git`).
 
 #### TASK-S049 [x] Bug — CDR perdus pour les appels via trunk (résolution tenant sur sip_from_host)
 Découvert le 2026-08-07 matin en investiguant une question de l'utilisateur ("j'ai ma

@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
+from app.core.config import settings
 from app.core.database import get_db
 from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
 from app.models.voicemail import VoicemailBox, VoicemailMessage
@@ -21,7 +22,7 @@ router = APIRouter()
 # Meme convention que ERPCRM (backend/uploads/catalogue) -- chemin absolu du serveur
 # ou tourne reellement le service (voir TASKSIPV.md TASK-S018.3 pour le rappel
 # d'architecture : /home/sipv/sipv/backend, pas la copie locale sur ERPCRM).
-UPLOAD_DIR = Path("/home/sipv/sipv/backend/uploads/voicemail_greetings")
+UPLOAD_DIR = Path(settings.APP_DIR) / "backend/uploads/voicemail_greetings"
 GREETING_TYPES = {"unavailable", "busy", "name", "temp"}
 
 

@@ -29,6 +29,7 @@ import re
 import uuid as uuid_mod
 from pathlib import Path
 from datetime import datetime, timezone
+from app.core.config import settings
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -86,7 +87,7 @@ REG_DOMAIN = "sipv"
 # TASK-S046/S047 -- meme repertoire que prompts.py::UPLOAD_DIR, duplique ici en
 # string simple (ce fichier n'a pas besoin de manipuler le filesystem, juste de
 # construire le chemin passe a `playback` pour FreeSWITCH).
-PROMPT_DIR = "/home/sipv/sipv/backend/uploads/audio_prompts"
+PROMPT_DIR = str(Path(settings.APP_DIR) / "backend/uploads/audio_prompts")
 
 
 def _context_name(account_number: str) -> str:
@@ -102,7 +103,7 @@ def _bridge(username: str, domain: str) -> str:
 
 
 # Nommage convenu avec l'utilisateur (TASK-023.4, 2026-07-24) : appelant-appele-date-heure.
-_RECORDINGS_DIR = "/usr/local/freeswitch/recordings"
+_RECORDINGS_DIR = str(Path(settings.FREESWITCH_DIR) / "recordings")
 
 
 def _record_action(enabled: bool) -> str:
