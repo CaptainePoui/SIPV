@@ -4146,7 +4146,7 @@ Fichiers : backend/app/models/sip.py, models/__init__.py,
 api/v1/endpoints/extensions.py, alembic/versions/0055_pickup_groups.py.
 Dépend de : TASK-S023.15, TASK-023.19.1 (TASKERPCRM.md).
 
-#### TASK-S057 [ ] Provisioning -- SIP transport (TLS/TCP) jamais poussé dans la config XML du téléphone
+#### TASK-S057 [x] Provisioning -- SIP transport (TLS/TCP) jamais poussé dans la config XML du téléphone
 
 Découvert par l'utilisateur (2026-08-11) en testant un appel bidirectionnel
 102↔103 : le 103 (GXP2170, poste réel de l'utilisateur, compte 3) ne
@@ -4154,17 +4154,42 @@ recevait pas d'appels entrants tant que son "SIP Transport" restait en UDP
 (config héritée de son ancien UCM). Une fois changé manuellement en TLS/TCP
 sur le téléphone, les appels fonctionnent dans les deux sens.
 
-Cause : `SIPExtension.transport` existe déjà en base (`tls` par défaut,
-`extensions.py`), mais **rien dans le générateur de provisioning
+Cause supposée à l'époque : "rien dans le générateur de provisioning
 (`api/v1/endpoints/provisioning.py`) ne pousse ce champ dans le XML de
-config du téléphone** -- confirmé, aucune référence à un P-value de
-transport SIP (ex: P1667 chez Grandstream) dans ce fichier. Chaque
-téléphone doit donc être configuré à la main pour le bon transport au lieu
-que le provisioning s'en charge automatiquement.
+config du téléphone" -- **cette conclusion était fausse**, trouvée en
+grep-ant seulement le code Python de l'endpoint, pas le contenu réel du
+`config_template` (stocké en DB, pas dans le dépôt).
 
-Pas commencé. Reste à faire : ajouter le P-value de transport SIP (à
-confirmer selon modèle -- GXP2135/GXP2170 potentiellement différents) au
-générateur de provisioning, alimenté par `SIPExtension.transport`.
+**Vérifié en conditions réelles (2026-08-16, boucle autonome)** : requête
+directe contre la DB SIPV en production -- le `config_template` du
+`PhoneModel` GXP2135 (le seul modèle avec un template réel ; GXP2130/2140/
+2160/2170 restent volontairement vides, voir TASK-S011.4 -- tous les postes
+réels et de test, dont le poste physique 103, sont provisionnés sous ce
+modèle GXP2135 peu importe le hardware réel) contient déjà, depuis le
+**2026-08-02** (TASK-S011.4, "premier vrai config_template GXP2135
+écrit") :
+```
+<P130>{{ {'udp': 0, 'tcp': 1, 'tls': 2}.get(extension.transport, 2) }}</P130>
+<P2329>{{ 1 if extension.transport == 'tls' else 0 }}</P2329>
+```
+Alimenté dynamiquement par `SIPExtension.transport` (`tls` par défaut),
+exactement ce que cette tâche demandait. TASK-S057 a donc été ouverte
+(2026-08-11) 9 jours APRÈS que ce câblage existait déjà -- doublon non
+détecté au moment de la création (voir la procédure de grep par mots-clés
+dans `feedback_workflow_rules`, pas suivie à l'époque).
+
+**Cause réelle du symptôme original (103 en UDP malgré le template déjà
+dynamique)** : pas un manque de câblage, mais que le téléphone physique 103
+n'avait pas re-tiré sa config depuis SIPV après le 2026-08-02 (config
+héritée de l'ancien UCM, jamais re-provisionnée automatiquement). Comment
+un téléphone neuf apprend l'URL de provisioning SIPV au tout premier
+démarrage (DHCP option 66 vs configuration manuelle unique) reste une
+question ouverte -- **c'est TASK-S011.4** (toujours `[~]`, décision
+explicite à trancher avec Philippe, non ré-ouverte ici, pas de scope
+nouveau ajouté).
+
+Aucun changement de code nécessaire -- correction de la documentation
+seulement, le comportement en production était déjà correct.
 
 #### TASK-S058 [x] Bug -- Hold GXP2170/GXP2135 raccrochait l'appel au lieu de le mettre en attente (rejet SRTP sur re-INVITE)
 
