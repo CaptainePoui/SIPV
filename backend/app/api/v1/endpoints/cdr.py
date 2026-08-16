@@ -273,7 +273,13 @@ async def list_cdr(
         filters.append(CDR.start_time <= date_to)
     if extension:
         from sqlalchemy import or_
-        filters.append(or_(CDR.src == extension, CDR.dst == extension))
+        # TASK-032 (verifie en prod, 2026-08-16) : les appels internes stockent
+        # `src` avec le prefixe tenant (ex. "t1001-103", = SIPExtension.username),
+        # jamais `dst` (reste le numero nu, "102") -- un simple == extension sur
+        # src ratait tous les appels SORTANTS d'un poste. Ajoute un match sur le
+        # suffixe "-{extension}" pour couvrir ce cas, en plus de l'egalite exacte
+        # (appels entrants externes ou src deja nu).
+        filters.append(or_(CDR.src == extension, CDR.dst == extension, CDR.src.like(f'%-{extension}')))
 
     total_res = await db.execute(select(func.count()).select_from(CDR).where(and_(*filters)))
     total = total_res.scalar_one()

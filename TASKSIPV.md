@@ -979,6 +979,33 @@ par les logs FreeSWITCH réels : Ring-Ready → answered → playback →
 Fichiers : `backend/app/api/v1/endpoints/prompts.py`.
 Dépend de : TASK-S055, TASK-S055.1, TASK-S055.3.
 
+#### TASK-S055.5 [x] Fix filtre CDR par poste -- ratait les appels SORTANTS (src prefixe tenant)
+
+Découvert en implémentant TASK-032 (TASKERPCRM.md, CDR dans fiche
+compagnie/contact ERPCRM) -- en testant le filtre `extension` existant de
+`GET /api/v1/cdr/tenant/{tenant_id}` (ajouté pour ce même TASK-S055,
+portail Mon poste) contre de vraies données de production.
+
+Vérifié en direct : pour un appel interne (103 -> 102), `CDR.src` est
+stocké "t1001-103" (= `sip_from_user`, le username SIP complet avec
+préfixe tenant) alors que `CDR.dst` reste le numéro nu "102". Le filtre
+`or_(CDR.src == extension, CDR.dst == extension)` ne pouvait donc JAMAIS
+matcher un appel par son poste SOURCE (seulement comme destinataire) --
+poste 103 : 0 résultat trouvé par ce filtre avant le fix alors que 17
+appels existaient réellement en DB pour ce poste (confirmé par requête
+directe). Affecte à la fois le portail Mon poste (own CDR, TASK-S055) et
+la nouvelle vue ERPCRM (TASK-032).
+
+Fix : ajout d'un 3e terme `CDR.src.like(f'%-{extension}')` au filtre
+(en plus des égalités exactes déjà en place, qui restent nécessaires pour
+les appels entrants externes où `src`/`dst` sont déjà nus).
+
+Fichiers : `backend/app/api/v1/endpoints/cdr.py`. `sipv-backend` +
+`sipv-backend-tls` redémarrés. Revérifié après coup : poste 103 -- 17
+appels retournés (au lieu de 0).
+Dépend de : TASK-S055.
+Cross-ref : TASK-032 (TASKERPCRM.md).
+
 #### TASK-S056 [x] Audit config centralisée -- éliminer les IPs/chemins codés en dur restants
 
 Lien TASKERPCRM : TASK-031 (détail complet côté ERPCRM). Fait le 2026-08-16
