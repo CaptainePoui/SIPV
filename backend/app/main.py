@@ -1,18 +1,26 @@
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.esl import esl_startup, esl_shutdown
 from app.core.moh_hold_tracker import hold_tracker_startup, hold_tracker_shutdown
+from app.services.backup_poller import run_backup_poller
 import app.models
-from app.api.v1.endpoints import auth, tenants, extensions, commit, sync, trunks, dids, routes, ivr, voicemail, cdr, e911, provisioning, recordings, fax, sms, security, webhooks, schedules, esl, xml_curl, audit, servers, prompts, moh
+from app.api.v1.endpoints import auth, tenants, extensions, commit, sync, trunks, dids, routes, ivr, voicemail, cdr, e911, provisioning, recordings, fax, sms, security, webhooks, schedules, esl, xml_curl, audit, servers, prompts, moh, backup
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await esl_startup()
     await hold_tracker_startup()
+    backup_task = asyncio.create_task(run_backup_poller())
     yield
+    backup_task.cancel()
+    try:
+        await backup_task
+    except asyncio.CancelledError:
+        pass
     await hold_tracker_shutdown()
     await esl_shutdown()
 
@@ -58,6 +66,7 @@ app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
 app.include_router(servers.router, prefix="/api/v1/servers", tags=["servers"])
 app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["prompts"])
 app.include_router(moh.router, prefix="/api/v1/moh", tags=["moh"])
+app.include_router(backup.router, prefix="/api/v1/backup", tags=["backup"])
 
 
 @app.get("/api/health")

@@ -169,11 +169,32 @@ class ESLClient:
         """Originate an outbound call."""
         vars_parts = []
         if caller_id_name:
-            vars_parts.append(f"origination_caller_id_name={caller_id_name}")
+            # Guillemets simples obligatoires si la valeur contient un espace
+            # (ex: "Ecoute Phrase") -- sans ca le parseur de variables de
+            # FreeSWITCH s'arrete au premier espace -> "Parse Error!".
+            vars_parts.append(f"origination_caller_id_name='{caller_id_name}'")
         if caller_id_number:
-            vars_parts.append(f"origination_caller_id_number={caller_id_number}")
+            vars_parts.append(f"origination_caller_id_number='{caller_id_number}'")
         vars_str = "{" + ",".join(vars_parts) + "}" if vars_parts else ""
         cmd = f"originate {vars_str}{endpoint} {extension} XML {context}"
+        return await self.bgapi(cmd)
+
+    async def originate_app(self, endpoint: str, app: str, app_args: str, caller_id_name: str = "", caller_id_number: str = "", timeout: int = 30) -> str:
+        """
+        Origine un appel et execute directement une application FreeSWITCH a la
+        reponse (pas de passage par le dialplan/context) -- syntaxe &app(args).
+        Ex: originate_app("user/1001@t1001", "playback", "/path/file.wav")
+        pour faire sonner le poste 1001 et jouer un fichier des que ca decroche.
+        """
+        vars_parts = [f"originate_timeout={timeout}", "ignore_early_media=true"]
+        if caller_id_name:
+            # Guillemets simples obligatoires si la valeur contient un espace --
+            # voir originate() ci-dessus, meme raison.
+            vars_parts.append(f"origination_caller_id_name='{caller_id_name}'")
+        if caller_id_number:
+            vars_parts.append(f"origination_caller_id_number='{caller_id_number}'")
+        vars_str = "{" + ",".join(vars_parts) + "}"
+        cmd = f"originate {vars_str}{endpoint} &{app}({app_args})"
         return await self.bgapi(cmd)
 
 

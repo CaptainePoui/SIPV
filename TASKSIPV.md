@@ -4355,3 +4355,111 @@ reprise d'un appel à l'autre.
 
 Reprise de position par appel en cours = toujours TASK-S058.3, non
 implémenté, distinct de ce fix.
+
+### TASK-S059 [x] Backup cloud automatique de notre propre infra SIPV (pas client) -- réglages page "Serveur"
+
+⚠️ Ne pas confondre avec TASK-S012.1 (stockage cloud du CLIENT pour ses
+enregistrements d'appel, service payant). Ici c'est NOTRE backup interne du
+serveur SIPV (DB + config + MOH) vers un cloud (Dropbox/OneDrive/Google
+Drive). Cross-ref ERPCRM : TASK-035 (TASKERPCRM.md), voir ce fichier pour la
+vision complète donnée par Philippe le 2026-08-13.
+
+Côté SIPV : page "Serveur" du portail -- réglages de connexion cloud +
+bouton de backup, avec un fichier de connexion/config SÉPARÉ de celui
+d'ERPCRM (pas de credentials partagés). Contenu du backup SIPV : dump DB +
+config serveur (kamailio.cfg, internal.xml, vars.xml, certs TLS) + MOH.
+Backup récurrent activable indépendamment d'ERPCRM, rotation en générations
+(ex. 3 mois, la plus ancienne s'écrase), fréquence/rétention à définir via
+sélecteur (1 jour/1 sem/1 mois/2 mois/3 mois -- portée du réglage encore à
+clarifier, voir questions ouvertes dans TASK-035 ERPCRM).
+
+**Décision 2026-08-13** : fournisseurs retenus pour tester = Dropbox ET Google
+Drive (voir TASK-035 ERPCRM pour le détail -- même décision, double backup ou
+failover si les deux sont connectés, encore à trancher).
+
+**Design confirmé 2026-08-13** : voir TASK-035 (TASKERPCRM.md) pour le détail
+complet -- même mécanique côté SIPV (page "Serveur") : double backup
+Dropbox+Google, un seul dump par run, cycles entièrement configurables
+(bouton "Ajouter un cycle", type de fréquence + case "générations" avec
+compte éditable, défaut 3), bande passante configurable, fichier de
+connexion cloud séparé de celui d'ERPCRM.
+
+**Précision 2026-08-13** : serveur SIPV tourne en UTC (`Etc/UTC`). Design
+final identique à TASK-035 (ERPCRM) : fuseau + heure de déclenchement +
+limite de bande passante réglés PAR CLOUD (Dropbox et Google Drive séparés),
+pas un seul réglage projet. Le cycle (fréquence/jour/rétention) reste
+défini une fois par projet, partagé par les deux clouds.
+
+Design considéré COMPLET, prêt pour plan technique final et GO d'implémentation.
+
+**GO reçu 2026-08-15 -- implémenté.** Architecture retenue : SIPV n'a pas de
+domaine public joignable par Dropbox/Google -- le flux OAuth est donc RELAYÉ
+par ERPCRM (seul serveur avec `https://portail.simpleip.tel`). ERPCRM ne
+reçoit/relaie que `code`+`state` (jamais le client_secret de SIPV, qui reste
+exclusivement sur SIPV).
+
+Fichiers touchés côté SIPV :
+- `backend/app/models/backup.py` (CloudBackupConnection avec `oauth_state`
+  directement sur la ligne -- pas d'AppSetting générique côté SIPV, contrairement
+  à ERPCRM ; BackupCycle, BackupRunLog) + import dans `models/__init__.py`
+- Migration `alembic/versions/0061_backup_tables.py` (convention SIPV :
+  fichiers numérotés manuels, pas autogenerate)
+- `backend/app/core/config.py` -- ajout DROPBOX_CLIENT_ID/SECRET,
+  GOOGLE_CLIENT_ID/SECRET (fallback optionnel), ERPCRM_PUBLIC_BASE_URL (pour
+  construire le redirect_uri OAuth pointant vers ERPCRM)
+- `backend/app/core/backup_cloud.py` -- quasi identique à la version ERPCRM
+  (OAuth + upload throttlé Dropbox/Google Drive), dossier cloud `SIPV_Backups`
+- `backend/app/workers/backup_runner.py` -- un seul `pg_dump` (DB `sipv`) +
+  tar par exécution : `.env`, `certs/`, unités systemd `sipv-backend*.service`,
+  `/etc/kamailio/kamailio.cfg`, `/etc/freeswitch/vars.xml`,
+  `/etc/freeswitch/conf/local_stream/`, MOH réel
+  (`/usr/local/freeswitch/sounds/sipv_moh_backups/`). PAS les enregistrements
+  d'appel (`recordings/`, hors scope, sujet TASK-S012.1/TASK-034 ERPCRM séparé).
+  Rotation par préfixe `sipv_{frequence}_{date}.tar.gz`. Anti-boucle : une
+  tentative par jour par connexion (même fix que le bug ERPCRM du 2026-08-14).
+- `backend/app/services/backup_poller.py` (nouveau dossier `services/`) --
+  poller asyncio in-process, démarré dans `main.py` lifespan
+- `backend/app/api/v1/endpoints/backup.py` -- CRUD connexions/cycles,
+  `GET /connections/{provider}/connect-url` (retourne l'URL au lieu de
+  rediriger -- c'est ERPCRM qui redirige le navigateur),
+  `POST /connections/{provider}/callback` (reçoit code+state relayés par
+  ERPCRM, fait l'échange réel ici). Auth `get_current_user_or_service` partout.
+- Dépendances ajoutées au venv + `requirements.txt` :
+  `google-api-python-client`, `google-auth`, `google-auth-httplib2`
+
+Fichiers touchés côté ERPCRM (proxy, voir aussi TASK-035) :
+- `backend/app/core/sipv_client.py` -- fonctions proxy (list/update
+  connexions, credentials, connect-url, relay_backup_callback, cycles CRUD,
+  run, logs)
+- `backend/app/api/v1/endpoints/server.py` -- routes `/api/v1/server/backup/*`.
+  `connect`/`callback` volontairement SANS authentification JWT (navigation
+  directe du navigateur après redirection Dropbox/Google, pas un appel XHR du
+  SPA -- CSRF protégé par le `state` côté SIPV, pas par un token ici)
+- `frontend/src/pages/Server.jsx` -- nouvelle section "Backup cloud SIPV"
+  (mêmes composants que Admin.jsx côté ERPCRM : cartes connexion, cycles,
+  bouton backup manuel, historique), gère `?server_backup=...` dans l'URL,
+  onglets "Téléphonie"/"Backup cloud" ajoutés en haut de la page (2026-08-16)
+
+Vérifié en conditions réelles (pas juste imports) :
+- `_build_dump()` testé directement sur SIPV -- tous les fichiers de config
+  présents dans l'archive (kamailio.cfg, vars.xml, local_stream, MOH, certs,
+  .env, unités systemd)
+- Chaîne proxy ERPCRM→SIPV testée directement -- réponse reçue avec succès
+- Dropbox connecté et backup manuel réussi (`sipv_daily_2026-08-16.tar.gz`),
+  cycles daily/weekly/monthly configurés et actifs
+- Services redémarrés des deux côtés, tous vérifiés actifs
+
+**Incident 2026-08-16** : découverte que le dépôt GitHub `CaptainePoui/SIPV`
+(poussé le 2026-08-12) l'était depuis un MIROIR du code SIPV conservé sur le
+disque d'ERPCRM (`/home/simpleip/sipv`), pas depuis le vrai serveur SIPV --
+qui n'a jamais eu de clé SSH GitHub. Ce miroir était donc périmé (aucun
+changement depuis le 12 août, alors que tout le travail de cette session a
+été déployé directement sur le vrai serveur par SSH). Resynchronisé par
+rsync (serveur réel -> miroir), MAIS un premier rsync avec `--delete` a
+supprimé par erreur des fichiers qui n'existaient QUE dans le miroir
+(CLAUDE.md, TASKSIPV.md, frontend/.env -- jamais déployés sur le serveur
+réel). Restaurés : CLAUDE.md et frontend/.env via `git checkout` (identiques
+à la dernière version commitée, aucune perte). TASKSIPV.md a dû être
+reconstruit manuellement (les ajouts de cette session, dont cette section-ci,
+n'étaient pas encore commit --  reconstruits depuis l'historique de la
+conversation, pas depuis git).

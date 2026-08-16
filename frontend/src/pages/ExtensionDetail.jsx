@@ -20,6 +20,12 @@ export default function ExtensionDetail() {
   const [e911Assignment, setE911Assignment] = useState(null)
   const [e911Form, setE911Form] = useState({ e911_address_id: '', emergency_location: '', floor: '', office: '' })
 
+  const CALL_PERMISSIONS = [
+    { value: 'local', label: 'Local seulement' },
+    { value: 'national', label: 'National (interurbain inclus)' },
+    { value: 'international', label: 'International' },
+  ]
+
   const TRANSPORTS = [
     { value: 'tls', label: 'TLS (recommandé, chiffré)' },
     { value: 'tcp', label: 'TCP' },
@@ -310,6 +316,13 @@ export default function ExtensionDetail() {
           <div className="form-group">
             <label>Description</label>
             <input value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
+          </div>
+          <div className="form-group">
+            <label>Plan d'appel</label>
+            <select value={form.call_permission} onChange={e => setForm({ ...form, call_permission: e.target.value })}>
+              {CALL_PERMISSIONS.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
+            </select>
+            <small style={{ color: '#DC6803' }}>⚠️ Pas encore appliqué au routage des appels — champ informatif pour l'instant.</small>
           </div>
           <button className="btn btn-primary btn-sm" type="submit">Enregistrer</button>
         </form>

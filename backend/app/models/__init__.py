@@ -19,3 +19,4 @@ from app.models.settings import TelephonySettings
 from app.models.server import SipvServer
 from app.models.prompt import AudioPrompt
 from app.models.moh import MohFile, TenantMohSelection
+from app.models.backup import CloudBackupConnection, BackupCycle, BackupRunLog

@@ -16,6 +16,18 @@ class Settings(BaseSettings):
     FREESWITCH_HOST: str = "127.0.0.1"
     FREESWITCH_ESL_PORT: int = 8021
     FREESWITCH_ESL_PASSWORD: str = "ClueCon"
+    # Backup cloud infra (TASK-S059) -- fallback si la connexion n'a pas ses
+    # propres credentials saisis dans Admin/Serveur (voir
+    # backup_cloud.resolve_credentials). Optionnel, Philippe entre ses
+    # propres cles Dropbox/Google pour SIPV via l'UI la plupart du temps.
+    DROPBOX_CLIENT_ID: str = ""
+    DROPBOX_CLIENT_SECRET: str = ""
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    # Seul ERPCRM a un domaine public joignable par Dropbox/Google -- le flux
+    # OAuth du backup SIPV est donc relaye via ERPCRM (voir endpoints/backup.py
+    # cote SIPV + server.py cote ERPCRM).
+    ERPCRM_PUBLIC_BASE_URL: str = "https://portail.simpleip.tel"
 
     class Config:
         env_file = ".env"

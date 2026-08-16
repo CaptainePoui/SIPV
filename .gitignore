@@ -15,6 +15,10 @@ backend/.venv/
 
 # Secrets — do NOT commit
 backend/.env
+backend/certs/
+
+# Fichiers .backup_* residuels
+*.backup_*
 
 # Alembic
 backend/alembic/versions/__pycache__/
@@ -25,5 +29,9 @@ frontend/dist/
 frontend/dist-ssr/
 frontend/*.local
 
+# Uploads (audio/generated, jamais dans git)
+backend/uploads/
+
 # Logs
 *.log
+logs/*

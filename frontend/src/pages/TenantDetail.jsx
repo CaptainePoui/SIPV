@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import api from '../services/api'
 
-const TABS = ['Extensions', 'Trunks', 'DIDs', 'Phrases', 'Changes']
+const TABS = ['Extensions', 'Trunks', 'DIDs', 'Changes']
 
 export default function TenantDetail() {
   const { id } = useParams()
@@ -12,28 +12,22 @@ export default function TenantDetail() {
   const [trunks, setTrunks] = useState([])
   const [dids, setDids] = useState([])
   const [changes, setChanges] = useState([])
-  const [prompts, setPrompts] = useState([])
-  const [promptForm, setPromptForm] = useState({ name: '', file: null })
-  const [promptUploading, setPromptUploading] = useState(false)
   const [showExtModal, setShowExtModal] = useState(false)
   const [extForm, setExtForm] = useState({ extension: '', name: '', voicemail_email: '' })
-  const [confirmDeleteExt, setConfirmDeleteExt] = useState(null)
 
   const load = async () => {
-    const [t, e, tr, d, ch, p] = await Promise.all([
+    const [t, e, tr, d, ch] = await Promise.all([
       api.get(`/tenants/${id}`),
       api.get(`/extensions/tenant/${id}`),
       api.get(`/trunks/tenant/${id}`),
       api.get(`/dids/tenant/${id}`),
       api.get(`/changes/pending/${id}`),
-      api.get(`/prompts/tenant/${id}`),
     ])
     setTenant(t.data)
     setExtensions(e.data)
     setTrunks(tr.data)
     setDids(d.data)
     setChanges(ch.data)
-    setPrompts(p.data)
   }
 
   useEffect(() => { load() }, [id])
@@ -57,44 +51,10 @@ export default function TenantDetail() {
     load()
   }
 
-  const deleteExt = async () => {
-    if (!confirmDeleteExt) return
-    await api.delete(`/extensions/${confirmDeleteExt.id}`)
-    setConfirmDeleteExt(null)
+  const deleteExt = async extId => {
+    if (!confirm('Supprimer cette extension?')) return
+    await api.delete(`/extensions/${extId}`)
     load()
-  }
-
-  const uploadPrompt = async e => {
-    e.preventDefault()
-    if (!promptForm.name || !promptForm.file) return
-    setPromptUploading(true)
-    try {
-      const fd = new FormData()
-      fd.append('name', promptForm.name)
-      fd.append('file', promptForm.file)
-      await api.post(`/prompts/tenant/${id}`, fd)
-      setPromptForm({ name: '', file: null })
-      load()
-    } catch (err) {
-      alert(err.response?.data?.detail || 'Échec de l\'upload')
-    } finally {
-      setPromptUploading(false)
-    }
-  }
-
-  const togglePromptActive = async p => {
-    await api.put(`/prompts/${p.id}`, { is_active: !p.is_active })
-    load()
-  }
-
-  const deletePrompt = async p => {
-    if (!confirm(`Supprimer la phrase « ${p.name} » ?`)) return
-    try {
-      await api.delete(`/prompts/${p.id}`)
-      load()
-    } catch (err) {
-      alert(err.response?.data?.detail || 'Suppression impossible')
-    }
   }
 
   if (!tenant) return <div>Chargement...</div>
@@ -137,12 +97,12 @@ export default function TenantDetail() {
             <tbody>
               {extensions.map(e => (
                 <tr key={e.id}>
-                  <td><Link to={`/extensions/${e.id}`}>{e.extension}</Link></td>
+                  <td>{e.extension}</td>
                   <td>{e.name}</td>
                   <td><code>{e.username}</code></td>
                   <td>{e.voicemail_email || '—'}</td>
-                  <td><span className={`badge ${e.freeswitch_synced ? 'badge-green' : 'badge-orange'}`}>{e.freeswitch_synced ? 'Oui' : 'En attente'}</span></td>
-                  <td><button className="btn btn-danger btn-sm" onClick={() => setConfirmDeleteExt(e)}>Suppr.</button></td>
+                  <td><span className={`badge ${e.asterisk_synced ? 'badge-green' : 'badge-orange'}`}>{e.asterisk_synced ? 'Oui' : 'En attente'}</span></td>
+                  <td><button className="btn btn-danger btn-sm" onClick={() => deleteExt(e.id)}>Suppr.</button></td>
                 </tr>
               ))}
             </tbody>
@@ -184,44 +144,6 @@ export default function TenantDetail() {
         </table>
       )}
 
-      {tab === 'Phrases' && (
-        <div>
-          <p style={{ fontSize: '.85rem', color: '#6B7280', marginTop: 0 }}>
-            Enregistrements réutilisables — attribuables comme accueil d'un IVR ou comme
-            destination "Message enregistré" d'un DID (raccroche automatiquement après
-            lecture, sauf si une 2e destination est ajoutée sur le DID).
-          </p>
-          <form onSubmit={uploadPrompt} style={{ display: 'flex', gap: '.5rem', alignItems: 'center', marginBottom: '1rem' }}>
-            <input placeholder="Nom de la phrase" value={promptForm.name}
-              onChange={e => setPromptForm({ ...promptForm, name: e.target.value })} required />
-            <input type="file" accept="audio/*"
-              onChange={e => setPromptForm({ ...promptForm, file: e.target.files[0] })} required />
-            <button type="submit" className="btn btn-primary btn-sm" disabled={promptUploading}>
-              {promptUploading ? 'Envoi…' : '+ Téléverser'}
-            </button>
-          </form>
-          <table>
-            <thead><tr><th>Nom</th><th>Durée</th><th>Statut</th><th></th></tr></thead>
-            <tbody>
-              {prompts.map(p => (
-                <tr key={p.id}>
-                  <td>{p.name}</td>
-                  <td>{p.duration_seconds != null ? `${p.duration_seconds}s` : '—'}</td>
-                  <td>
-                    <span className={`badge ${p.is_active ? 'badge-green' : 'badge-gray'}`}
-                      style={{ cursor: 'pointer' }} onClick={() => togglePromptActive(p)}>
-                      {p.is_active ? 'Actif' : 'Inactif'}
-                    </span>
-                  </td>
-                  <td><button className="btn btn-danger btn-sm" onClick={() => deletePrompt(p)}>Suppr.</button></td>
-                </tr>
-              ))}
-              {prompts.length === 0 && <tr><td colSpan={4} style={{ color: '#9CA3AF' }}>Aucune phrase.</td></tr>}
-            </tbody>
-          </table>
-        </div>
-      )}
-
       {tab === 'Changes' && (
         <table>
           <thead><tr><th>Type</th><th>Entité</th><th>Statut</th><th>Créé par</th><th>Date</th></tr></thead>
@@ -237,27 +159,6 @@ export default function TenantDetail() {
             ))}
           </tbody>
         </table>
-      )}
-
-      {confirmDeleteExt && (
-        <div className="modal-backdrop">
-          <div className="modal">
-            <h3>Supprimer l'extension {confirmDeleteExt.extension} ?</h3>
-            <p>
-              Poste <strong>{confirmDeleteExt.extension} — {confirmDeleteExt.name}</strong> ({confirmDeleteExt.username}).
-              Cette action est irréversible.
-            </p>
-            <p style={{ fontSize: '.85rem', color: '#6B7280' }}>
-              Le mot de passe SIP actuel sera conservé dans le journal d'audit — si tu dois
-              recréer ce poste plus tard, tu pourras récupérer le même mot de passe via
-              l'historique de l'extension.
-            </p>
-            <div className="modal-footer">
-              <button type="button" className="btn" onClick={() => setConfirmDeleteExt(null)}>Annuler</button>
-              <button type="button" className="btn btn-danger" onClick={deleteExt}>Supprimer</button>
-            </div>
-          </div>
-        </div>
       )}
 
       {showExtModal && (
