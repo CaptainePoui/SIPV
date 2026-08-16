@@ -4462,4 +4462,22 @@ réel). Restaurés : CLAUDE.md et frontend/.env via `git checkout` (identiques
 à la dernière version commitée, aucune perte). TASKSIPV.md a dû être
 reconstruit manuellement (les ajouts de cette session, dont cette section-ci,
 n'étaient pas encore commit --  reconstruits depuis l'historique de la
-conversation, pas depuis git).
+conversation, pas depuis git). Vérifié par dates de modification réelles sur
+le serveur SIPV (`find -newer`) : aucun fichier touché entre le 12 août
+12h43 et cette session -- confirme qu'aucune session intermédiaire n'a été
+perdue, seul le rattrapage de CETTE session était nécessaire.
+
+Miroir rattrapé et repoussé (`bc50f73`), mais Philippe a explicitement
+rejeté cette approche (2026-08-16) : SIPV doit être autonome vis-à-vis
+d'ERPCRM, d'autant plus qu'il va changer de serveur bientôt (voir mémoire
+`project_server_migration_planned`). Remplacement en cours : accès Git
+DIRECT depuis le serveur SIPV lui-même (`git@github.com:CaptainePoui/SIPV.git`),
+clé de déploiement dédiée déjà générée sur SIPV
+(`~/.ssh/id_ed25519_github`), en attente que Philippe l'ajoute comme Deploy
+Key (accès écriture) sur GitHub avant de finaliser (`git init` local déjà
+fait, remote déjà configuré, reste `git fetch` + `git reset origin/main`
+une fois la clé autorisée).
+
+**État final 2026-08-16** : Dropbox ✓ connecté et testé (voir plus haut).
+Google Drive -- reporté par choix explicite de Philippe ("je n'activerai
+pas l'API Google de suite"), pas un blocage technique, code déjà prêt.

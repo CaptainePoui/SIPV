@@ -35,3 +35,4 @@ backend/uploads/
 # Logs
 *.log
 logs/*
+frontend/.env
