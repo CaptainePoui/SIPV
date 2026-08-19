@@ -41,6 +41,7 @@ class TenantOut(BaseModel):
     default_blocked_prefixes: str | None = None
     has_default_ld_pin: bool = False  # jamais le NIP en clair dans la liste/fiche compagnie
     default_ld_monthly_limit: float | None = None
+    cdr_retention_days: int = 365  # TASK-032.2
     default_caller_id_name: str | None = None
     default_caller_id_number: str | None = None
     phone_option_defaults: dict | None = None  # TASK-S011.5
@@ -72,12 +73,14 @@ class TenantUpdate(BaseModel):
     default_blocked_prefixes: str | None = None
     default_ld_pin: str | None = None  # en clair a l'entree, chiffre avant stockage
     default_ld_monthly_limit: float | None = None
+    cdr_retention_days: int = 365  # TASK-032.2
     default_caller_id_name: str | None = None
     default_caller_id_number: str | None = None
     phone_option_defaults: dict | None = None  # TASK-S011.5
     selected_tenant_template_ids: list[uuid.UUID] | None = None  # TASK-S044.2
     selected_global_template_ids: list[uuid.UUID] | None = None  # TASK-S044.2
     moh_shuffle: bool | None = None  # TASK-S033.2
+    cdr_retention_days: int | None = None  # TASK-032.2
 
 
 def _tenant_out(t: Tenant) -> TenantOut:
@@ -100,6 +103,7 @@ def _tenant_out(t: Tenant) -> TenantOut:
         selected_tenant_template_ids=t.selected_tenant_template_ids or [],
         selected_global_template_ids=t.selected_global_template_ids or [],
         moh_shuffle=t.moh_shuffle,
+        cdr_retention_days=t.cdr_retention_days,
     )
 
 

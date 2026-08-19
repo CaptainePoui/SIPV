@@ -6,6 +6,7 @@ from app.core.config import settings
 from app.core.esl import esl_startup, esl_shutdown
 from app.core.moh_hold_tracker import hold_tracker_startup, hold_tracker_shutdown
 from app.services.backup_poller import run_backup_poller
+from app.services.cdr_retention_poller import run_cdr_retention_poller
 import app.models
 from app.api.v1.endpoints import auth, tenants, extensions, commit, sync, trunks, dids, routes, ivr, voicemail, cdr, e911, provisioning, recordings, fax, sms, security, webhooks, schedules, esl, xml_curl, audit, servers, prompts, moh, backup
 
@@ -15,10 +16,16 @@ async def lifespan(app: FastAPI):
     await esl_startup()
     await hold_tracker_startup()
     backup_task = asyncio.create_task(run_backup_poller())
+    cdr_retention_task = asyncio.create_task(run_cdr_retention_poller())
     yield
     backup_task.cancel()
+    cdr_retention_task.cancel()
     try:
         await backup_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await cdr_retention_task
     except asyncio.CancelledError:
         pass
     await hold_tracker_shutdown()

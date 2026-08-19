@@ -1074,6 +1074,35 @@ appels retournés (au lieu de 0).
 Dépend de : TASK-S055.
 Cross-ref : TASK-032 (TASKERPCRM.md).
 
+#### TASK-S055.6 [x] Retention CDR configurable + champs de detail (TASK-032.2)
+
+Demande de Philippe (2026-08-19), cote SIPV, 2 morceaux lies a
+TASK-032.2 (detail complet dans TASKERPCRM.md) :
+- `Tenant.cdr_retention_days` (migration 0062, defaut 365 -- 1 an) +
+  `backend/app/workers/cdr_retention_runner.py`/`services/
+  cdr_retention_poller.py` (meme pattern que backup_poller.py, purge
+  horaire des CDR plus vieux que la retention du tenant). Expose sur
+  `TenantOut`/`TenantUpdate` (`tenants.py`) -- reglable via le proxy
+  ERPCRM existant, pas de nouvel endpoint SIPV. Pas de logique de
+  facturation/paywall ajoutee (pas demande) -- juste le champ, a ajuster
+  manuellement par Philippe si un client paie pour plus de retention.
+- `CDROut` (`cdr.py`) etendu (`answer_time`, `end_time`, `duration`,
+  `clid`, `accountcode`) pour le detail d'appel au clic cote ERPCRM
+  (champs deja en DB, juste jamais exposes par l'API avant).
+
+Verifie en conditions reelles : `purge_expired_cdr()` execute contre la
+DB de prod (0 supprime, rien de plus vieux qu'1 an -- attendu), champs de
+detail confirmes dans la reponse `list_cdr` (ex. `answer_time`/
+`duration` corrects pour un appel reel). `sipv-backend` + `sipv-backend-tls`
+redemarres, demarrage propre confirme (poller de retention actif).
+
+Fichiers : `backend/app/models/tenant.py`, `alembic/versions/
+0062_cdr_retention.py`, `backend/app/api/v1/endpoints/tenants.py`,
+`backend/app/api/v1/endpoints/cdr.py`, `backend/app/main.py`,
+`backend/app/workers/cdr_retention_runner.py`,
+`backend/app/services/cdr_retention_poller.py`.
+Cross-ref : TASK-032.2 (TASKERPCRM.md).
+
 #### TASK-S056 [x] Audit config centralisée -- éliminer les IPs/chemins codés en dur restants
 
 Lien TASKERPCRM : TASK-031 (détail complet côté ERPCRM). Fait le 2026-08-16

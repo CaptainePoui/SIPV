@@ -235,6 +235,12 @@ class CDROut(BaseModel):
     cost: Decimal | None
     rate_per_minute: Decimal | None
     uniqueid: str | None
+    # TASK-032.2 -- detail au clic (pas dans le tableau, juste au clic sur une ligne)
+    answer_time: datetime | None = None
+    end_time: datetime | None = None
+    duration: int | None = None  # duree totale incl. sonnerie, vs billsec = duree facturee
+    clid: str | None = None      # nom afficheur (caller ID name)
+    accountcode: str | None = None
 
 class CDRSummary(BaseModel):
     total_calls: int
@@ -295,7 +301,9 @@ async def list_cdr(
         total=total, page=page, page_size=page_size,
         items=[CDROut(id=c.id, tenant_id=c.tenant_id, src=c.src, dst=c.dst, disposition=c.disposition,
                       direction=c.direction, billsec=c.billsec, start_time=c.start_time,
-                      cost=c.cost, rate_per_minute=c.rate_per_minute, uniqueid=c.uniqueid)
+                      cost=c.cost, rate_per_minute=c.rate_per_minute, uniqueid=c.uniqueid,
+                      answer_time=c.answer_time, end_time=c.end_time, duration=c.duration,
+                      clid=c.clid, accountcode=c.accountcode)
                for c in items]
     )
 

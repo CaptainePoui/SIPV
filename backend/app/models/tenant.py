@@ -70,6 +70,11 @@ class Tenant(Base):
     # phone_option_defaults.
     selected_global_template_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list, server_default="{}")
 
+    # TASK-032.2 (TASKERPCRM.md) -- retention CDR en jours, 1 an par defaut.
+    # Augmentable manuellement par Philippe si un client paie pour la ressource
+    # (pas de logique de facturation ajoutee ici, juste le champ).
+    cdr_retention_days: Mapped[int] = mapped_column(Integer, default=365, server_default="365")
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
