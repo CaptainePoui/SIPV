@@ -607,8 +607,8 @@ Reste à faire [~] — câbler `log_audit()` dans :
 | Task        | Module-clé    | Description                                                                     |
 |-------------|---------------|---------------------------------------------------------------------------------|
 | TASK-S018   | ux extension  | Fiche extension unifiée — codec, voicemail, provisioning, horaires, statut live |
-| TASK-S018.1 | ux did        | Fiche DID unifiée — routage, horaires, destination, E911 sur une seule page     |
-| TASK-S018.2 | ux trunk      | Fiche trunk unifiée — carrier, credentials, failover, statut live               |
+| TASK-S018.1 | ux did        | [ ] Sautée -- carrier/type de DID non definis (voir entree detaillee)          |
+| TASK-S018.2 | ux trunk      | [x] Fiche trunk unifiée — carrier, credentials, failover, statut live          |
 | TASK-S018.3 | ux extension  | Identification/site, plan d'appel, renvois, DND, codec liste ordonnée, groupes ✓|
 
 #### TASK-S018 [~] Fiche extension unifiée (style UCM Grandstream)
@@ -716,15 +716,83 @@ Reste à faire (hors scope volontaire de cette tâche, à faire séparément et 
    CSV) -- fonctionnel, pas raffiné.
 
 #### TASK-S018.1 [ ] Fiche DID unifiée
-Tout ce qui touche un DID = sur une seule page :
-Numéro, carrier, type, destination principale, horaires (destination selon heure),
-E911 assigné, enregistrement activé, historique appels (CDR filtrés sur ce DID).
 
-#### TASK-S018.2 [ ] Fiche trunk unifiée
+SAUTÉE (2026-08-16, boucle autonome) -- pas une vraie question ouverte
+documentée dans la tâche elle-même, mais deux champs demandés
+("carrier", "type") n'ont aucune définition dans le modèle `TenantDID`
+actuel ni ailleurs dans le code : `TenantDID` n'a pas de `trunk_id` (le
+lien DID -> trunk n'existe nulle part, un appel entrant est matché par
+numéro seul, pas par gateway d'origine) et "type" n'a pas de valeurs
+possibles définies (local/toll-free/international ? autre chose ?).
+Inventer ces deux champs aurait été une supposition (LOI 4) plutôt qu'une
+implémentation d'une demande précise. Le reste de la demande (destination,
+horaires, E911) existe déjà sur la fiche DID actuelle (`DIDOut`,
+`CompanyDetail.jsx`) ; "historique d'appels filtré sur ce DID" est
+faisable avec l'infrastructure CDR de TASK-032 (filtre par numéro au lieu
+d'extension) mais pas fait ici, gardé pour ne pas livrer une fiche
+DID "à moitié neuve" avec des champs inventés à côté.
+Reprendre après clarification de Philippe sur ces deux champs.
+
+#### TASK-S018.2 [x] Fiche trunk unifiée
+
 Tout ce qui touche un trunk = sur une seule page :
 Carrier, host, port, username/password, from_domain, caller ID sortant,
 failover trunk assigné, routes utilisant ce trunk,
 statut live (UP/DOWN via ESL sofia status).
+
+**Fait (2026-08-16/19, boucle autonome, GO global de Philippe)** :
+- `backend/app/api/v1/endpoints/trunks.py` -- CRUD déjà existant (list/
+  create/update/delete) basculé de `get_current_user` (JWT strict) vers
+  `get_current_user_or_service` sur les 4 endpoints (même pattern que
+  extensions.py/ivr.py) pour qu'ERPCRM puisse les appeler avec sa clé de
+  service -- bloquant, sans ça aucun proxy n'était possible.
+- Nouveau `GET /{trunk_id}/status` -- statut live réel via ESL
+  (`sofia status gateway {tenant.account_number}-gw-{8 premiers
+  caractères du trunk_id}`, convention de nom déjà établie TASK-023.27).
+  Bug de parsing trouvé ET corrigé pendant le test réel : la sortie
+  `fs_cli` utilise des champs alignés par tabulation
+  (`State␉␉REGED`), pas `State: REGED` comme deviné au premier essai --
+  regex corrigée en `^State\s+(\S+)` (ancré en début de ligne pour ne
+  pas matcher `PingState`/`FailedCallsIN` etc.), reconfirmé contre le
+  vrai gateway ScopServ (`t1001-gw-1e083163`) : `REGED`/`UP` retournés
+  correctement après le fix.
+  ⚠️ Le fichier gateway lui-même reste écrit à la main sur le serveur
+  (écart déjà documenté TASK-023.27, pas résolu ici -- resterait à faire
+  si des trunks/tenants s'ajoutent fréquemment) -- `configured: false`
+  distingue explicitement "trunk enregistré dans SIPV" de "gateway
+  réellement déployé sur FreeSWITCH", pour ne jamais laisser croire
+  qu'une modification dans cette fiche prend effet automatiquement sur
+  le trunk réel.
+- Nouveau `GET /{trunk_id}/routes" -- routes sortantes (`OutboundRoute`)
+  qui référencent ce trunk, réellement lues par le dialplan dynamique
+  (`xml_curl.py`), contrairement au gateway lui-même.
+- Côté ERPCRM : `sipv_client.py` (list/create/update/delete_trunk +
+  get_trunk_status/get_trunk_routes), `telephony.py` (`/company/{id}/
+  trunks`, `/trunks/{id}`, `/trunks/{id}/status`, `/trunks/{id}/routes`),
+  `CompanyDetail.jsx` (`TrunkSection`, onglet Téléphonie) -- tableau
+  avec ligne dépliable : formulaire complet (carrier/host/username/
+  password/caller ID/failover), badge "non synchronisé" (surface
+  honnêtement `freeswitch_synced=false`), badge live UP/DOWN chargé à
+  la demande (pas à chaque ligne au chargement, pour ne pas spammer ESL),
+  liste des routes utilisant ce trunk.
+
+Vérifié en conditions réelles : chaîne complète testée contre le vrai
+trunk ScopServ (`ScopServ Test`, tenant Simple IP inc.) -- liste,
+statut live (`REGED`/`UP`), et la route réelle ("ScopServ test
+outbound") tous retournés correctement à travers
+sipv_client -> proxy ERPCRM. Routes FastAPI confirmées enregistrées et
+répondantes via `/openapi.json` (app démarrée sans erreur). `npm run
+build` + les 3 services ERPCRM + `sipv-backend`/`sipv-backend-tls`
+redémarrés, tous vérifiés actifs.
+⚠️ Pas de clic-test réel dans un navigateur (Philippe revenu pendant
+l'implémentation, rapport demandé) -- à valider visuellement à l'usage.
+
+Fichiers SIPV : `backend/app/api/v1/endpoints/trunks.py`.
+Fichiers ERPCRM : `backend/app/core/sipv_client.py`,
+`backend/app/api/v1/endpoints/telephony.py`,
+`frontend/src/pages/CompanyDetail.jsx`.
+Cross-ref : TASKERPCRM.md (pas d'entrée séparée, même feature, documentée
+ici puisque TASK-S018.2 est le numéro d'origine de la demande).
 
 ---
 
