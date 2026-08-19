@@ -1103,6 +1103,22 @@ Fichiers : `backend/app/models/tenant.py`, `alembic/versions/
 `backend/app/services/cdr_retention_poller.py`.
 Cross-ref : TASK-032.2 (TASKERPCRM.md).
 
+#### TASK-S055.7 [x] Filtre CDR par recherche libre (search) sur src/dst (TASK-032.5)
+
+Demande de Philippe (TASKERPCRM.md TASK-032.5) : recherche libre dans le
+CDR (ex. "514" trouve tout numero qui contient 514), cote ERPCRM (fiche
+compagnie/contact). Nouveau parametre `search` sur `GET /cdr/tenant/{id}`
+(`cdr.py`) -- `ILIKE '%...%'` sur `src` OU `dst`. `date_from`/`date_to`
+existaient deja (type `datetime`, deja precis a la minute) -- juste
+jamais exposes cote UI ERPCRM avant cette tache.
+
+Verifie en conditions reelles : `search=102` contre le tenant "Simple
+IP inc." -- 17 resultats corrects. `sipv-backend` + `sipv-backend-tls`
+redemarres.
+
+Fichiers : `backend/app/api/v1/endpoints/cdr.py`.
+Cross-ref : TASK-032.5 (TASKERPCRM.md).
+
 #### TASK-S056 [x] Audit config centralisée -- éliminer les IPs/chemins codés en dur restants
 
 Lien TASKERPCRM : TASK-031 (détail complet côté ERPCRM). Fait le 2026-08-16

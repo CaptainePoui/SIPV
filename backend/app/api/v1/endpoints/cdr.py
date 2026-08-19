@@ -265,6 +265,7 @@ async def list_cdr(
     date_from: datetime | None = Query(None),
     date_to: datetime | None = Query(None),
     extension: str | None = Query(None, description="TASK-S055 : filtre sur src OU dst (numéro nu, ex: '101') -- portail Mon poste"),
+    search: str | None = Query(None, description="TASK-032.5 : recherche partielle sur src OU dst, ex: '514' trouve tout numero contenant 514"),
     db: AsyncSession = Depends(get_db),
     _: User | None = Depends(get_current_user_or_service),
 ):
@@ -286,6 +287,9 @@ async def list_cdr(
         # suffixe "-{extension}" pour couvrir ce cas, en plus de l'egalite exacte
         # (appels entrants externes ou src deja nu).
         filters.append(or_(CDR.src == extension, CDR.dst == extension, CDR.src.like(f'%-{extension}')))
+    if search:
+        from sqlalchemy import or_
+        filters.append(or_(CDR.src.ilike(f'%{search}%'), CDR.dst.ilike(f'%{search}%')))
 
     total_res = await db.execute(select(func.count()).select_from(CDR).where(and_(*filters)))
     total = total_res.scalar_one()
