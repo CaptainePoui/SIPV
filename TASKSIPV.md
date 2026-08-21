@@ -4667,3 +4667,1065 @@ une fois la clé autorisée).
 **État final 2026-08-16** : Dropbox ✓ connecté et testé (voir plus haut).
 Google Drive -- reporté par choix explicite de Philippe ("je n'activerai
 pas l'API Google de suite"), pas un blocage technique, code déjà prêt.
+
+### TASK-S060 [ ] Conférence -- backlog non prioritaire
+
+Repéré pendant la revue d'arborescence téléphonie côté ERPCRM (2026-08-19,
+voir TASK-S043). `mod_conference` est chargé et configuré sur le serveur
+FreeSWITCH (`autoload_configs/conference.conf.xml`) mais aucun modèle SIPV ne
+l'exploite -- aucune table, aucun endpoint. `DESTINATION_TYPES`
+(`api/v1/endpoints/dids.py`) réserve déjà la valeur `conference` dans l'énum
+mais rien de fonctionnel derrière -- choisir ce type de destination ne
+mènerait nulle part aujourd'hui.
+
+Explicitement dépriorisé par Philippe : "en 8 ans j'ai utilisé conference 1
+fois". Pendant ERPCRM : TASK-037 (TASKERPCRM.md). Ne pas construire sans GO.
+
+### TASK-S061 [ ] Parcage d'appel -- utilisé en permanence chez les clients, PAS dépriorisé
+
+⚠️ Distinct de TASK-S060 (Conférence) -- Philippe a corrigé le classement
+initial (2026-08-19) : le parcage n'est pas un backlog dormant, c'est une
+fonction utilisée activement et en permanence chez ses clients. Analogie
+donnée : l'équivalent moderne d'une ligne partagée mise en attente sur un
+ancien système analogique -- on park un appel, et il apparaît en BLF sur
+tous les postes pour que n'importe qui le reprenne. Important pour la
+priorisation future.
+
+État réel : `ParkingLot` existe déjà comme modèle (`models/ivr.py`, depuis
+TASK-S007) mais aucun endpoint ne l'expose dans `api/v1/endpoints/ivr.py`
+(IVR/Queue/RingGroup/PagingGroup ont un CRUD, pas ParkingLot). Rien côté
+ERPCRM non plus. Point encourageant : `PhoneButton.button_type`
+(`models/provisioning.py`) a déjà `park` et `park_retrieve` dans son
+énumération de types de touches -- le BLF de parcage était déjà anticipé au
+niveau du provisioning.
+
+**Plan technique (2026-08-19, proposé par ChatGPT puis vérifié ligne par
+ligne dans le vrai module chargé sur ce serveur -- `fs_cli show
+application`/`show api` + lecture de
+`/usr/src/freeswitch-1.10.12/src/mod/applications/mod_valet_parking/mod_valet_parking.c`,
+présent sur ce serveur) :**
+1. CRUD `ParkingLot` -- modèle déjà là, même patron que
+   ring-groups/paging-groups (`api/v1/endpoints/ivr.py`).
+2. Dialplan `park_extension` (700 par défaut) → appli `valet_park <lot> auto
+   in <min> <max>`. Confirmé par `fs_cli show application` : PAS de
+   `valet_park_fetch`, cette appli n'existe pas dans le module -- erreur
+   d'un plan précédent, corrigée avant de coder.
+3. Dialplan `parking_slots_start`-`end` (701-720 par défaut) → même appli
+   `valet_park <lot> <extension>` -- une seule appli gère park ET reprise
+   selon l'état de l'appel.
+4. Timeout/retour : variables natives `valet_parking_timeout` et
+   `valet_parking_orbit_exten` (confirmées littéralement dans le source
+   C, lignes ~625-644 et ~696-714), pas de logique maison à inventer.
+5. Statut des slots occupés : API `valet_info <lot>` (confirmée par
+   `fs_cli show api`), même famille que le pattern ESL déjà existant
+   (`esl.py`, `monitoring/{username}`).
+6. BLF : le module émet bien `SWITCH_EVENT_PRESENCE_IN` à chaque
+   changement d'état de slot (confirmé dans le source, ~9 occurrences) et
+   bind `SWITCH_EVENT_PRESENCE_PROBE` -- support moteur réel. Mais ne pas
+   déployer avant un test réel sur un poste Grandstream -- l'émission
+   d'événement ne garantit pas l'affichage correct côté téléphone.
+7. Remplissage des touches BLF (701→7xx) : PAS automatique -- un GXP2135
+   (8 touches) et un GXP2170 (24+) n'ont pas la même capacité, ça reste un
+   choix de configuration humain.
+8. Proxy ERPCRM + écran : en dernier.
+
+Multi-lots par tenant : vérifié, aucune contrainte unique sur `tenant_id`
+dans le modèle ni dans les migrations (`grep` sur `alembic/versions/`) --
+plusieurs `ParkingLot` par tenant déjà supportés par le schéma tel quel.
+
+Pendant ERPCRM : TASK-038 (TASKERPCRM.md). Toujours pas de GO pour
+construire.
+
+**Recherche complémentaire (2026-08-19, 6 points challengés par ChatGPT,
+vérifiés dans le vrai code de ce serveur plutôt qu'estimés) :**
+
+1. **Collision de numéros — AUCUN mécanisme central n'existe, confirmé.**
+   `create_extension` (`extensions.py`) ne vérifie l'unicité que dans sa
+   propre table (`SIPExtension.username`). `create_ring_group` et
+   `create_paging_group` (`ivr.py`) n'ont **aucune** validation, même pas
+   dans leur propre table. Rien ne croise Extension/RingGroup/PagingGroup/
+   ParkingLot entre eux -- trou systémique déjà présent, pas spécifique au
+   parking. `IVR`/`Queue` n'ont pas de champ extension direct (atteints via
+   destination_id).
+2. **Slot vide (701 sans appel dedans)** : confirmé dans
+   `mod_valet_parking.c` (~ligne 550-605) -- `valet_park <lot> <ext>`
+   cherche un token existant pour cet ext ; s'il n'y en a pas, l'appel EN
+   COURS est parké dans ce slot (aucun message, aucun raccrochage). Même
+   appli pour parker et reprendre, selon qu'un token existe déjà.
+3. **Timeout/retour, 4 cas confirmés dans le source (~ligne 690-740)** :
+   ni timeout ni orbit réglés → attente indéfinie (musique) ; timeout seul
+   → sortie du parking sans transfert au timeout (tombe sur la suite du
+   dialplan) ; timeout+orbit → `switch_ivr_session_transfer` vers l'orbit ;
+   orbit invalide ou boucle retour-vers-parking → le module ne protège
+   contre rien, responsabilité du dialplan généré par `xml_curl.py` ;
+   poste de retour occupé/muet → redevient un appel normal, régi par les
+   règles de cette extension.
+4. **BLF bout en bout (Grandstream→Kamailio→FreeSWITCH→Kamailio→Grandstream)** :
+   module confirmé émettre `SWITCH_EVENT_PRESENCE_IN`/bind `PRESENCE_PROBE`,
+   mais le chemin complet à travers Kamailio n'est pas vérifiable par
+   lecture de code -- test réel sur poste requis, reporté à l'étape 8.
+5. **`PhoneButton.button_type` `park`(19)/`park_retrieve`(26)** : mappés
+   dans `BUTTON_TYPE_TO_GS_MODE` (`provisioning.py`), mais seuls
+   BLF(11)/Speed Dial(10) sont confirmés "empiriquement contre un fichier
+   ScopServ réellement fonctionnel" par le commentaire du code lui-même --
+   park/park_retrieve n'ont pas cette confirmation, ne pas assumer que le
+   gabarit de config produit un P-code Grandstream correct sans test réel.
+
+**Ordre retenu (proposé par ChatGPT, adopté) :**
+1. Mécanisme central de détection de collision de numéros (partagé
+   Extension/RingGroup/PagingGroup/ParkingLot, PAS une validation spéciale
+   ParkingLot)
+2. CRUD ParkingLot
+3. Dialplan 700 (auto in)
+4. Dialplan 701-7xx (valet_park direct)
+5. Test réel park/reprise (fs_cli + téléphones)
+6. Test réel timeout/orbit
+7. `valet_info` / statut
+8. BLF réel à travers Kamailio
+9. Provisioning des touches
+10. Proxy ERPCRM
+11. Interface ERPCRM
+
+**Étape 1 livrée (2026-08-19)** — mécanisme central de collision de numéros,
+GO explicite de Philippe, plan verrouillé par ChatGPT avant de coder :
+
+- Inventaire confirmé dans le code (pas supposé) : seuls `SIPExtension`,
+  `RingGroup`, `PagingGroup`, `ParkingLot` consomment un numéro composable
+  par tenant. IVR/Queue routés par `destination_id`, PickupGroup = code fixe
+  `*8`, Fax = rattaché à un DID externe, voicemail = codes étoiles fixes
+  (`*97`/`*98`, vus dans `_dialplan_internal`). Scope tenant confirmé
+  techniquement correct (`xml_curl.py` filtre déjà tout par `tenant_id`
+  dérivé de l'appelant).
+- `app/core/numbering.py` (nouveau) : `check_internal_number_available` /
+  `check_internal_range_available`, aucune nouvelle table -- interroge
+  directement `sip_extensions`/`ring_groups`/`paging_groups`/`parking_lots`.
+  Une plage réserve chaque numéro individuel qu'elle couvre. `exclude_object`
+  pour ignorer l'objet en cours d'édition.
+- Scan des données actuelles avant d'activer quoi que ce soit : zéro
+  collision existante (`sip_extensions`=4 lignes, les 3 autres tables vides).
+- Infrastructure de tests créée (première du projet) -- suite au challenge
+  de Philippe sur le rollback-sur-DB-de-dev (risque de fuite si un futur
+  endpoint fait son propre `commit()`) : DB dédiée `sipv_test` sur la même
+  instance Postgres, migrations Alembic appliquées, `TEST_DATABASE_URL`
+  dans `config.py`, garde-fou dans `tests/conftest.py` qui refuse de
+  démarrer si l'URL ne contient pas `_test` ou égale `DATABASE_URL` (testé
+  positif et négatif). Transaction+SAVEPOINT par test
+  (`join_transaction_mode="create_savepoint"`, SQLAlchemy 2.0), annulée à la
+  fin -- `sipv_test` ne garde jamais de résidu. `pytest`/`pytest-asyncio`
+  ajoutés à `requirements.txt`.
+- `tests/test_numbering.py` : les 7 scénarios demandés, tous verts --
+  extension existante bloque une plage, ring group bloque un pilote, paging
+  group bloque une plage, deux lots qui se chevauchent refusés, deux lots
+  adjacents acceptés, isolation entre tenants acceptée, éditer un lot sans
+  changer sa plage accepté (exclude_object).
+- Piège rencontré et corrigé : connexions asyncpg liées à l'event loop --
+  pytest-asyncio ouvre un nouvel event loop par test, un moteur de test
+  avec pool par défaut recyclait une connexion d'un loop fermé
+  ("cannot perform operation: another operation is in progress"). Corrigé
+  avec `poolclass=NullPool` sur le moteur de test (connexion fraîche à
+  chaque test, pas de connexion partagée entre event loops).
+
+Pas encore fait : le CRUD ParkingLot lui-même (étape 2) n'utilise pas
+encore ce validateur -- attendu avant l'étape 2, pas construit sans nouveau
+GO.
+
+**Correction (2026-08-19, même jour)** -- Philippe avait raison de vérifier :
+le récapitulatif initial de l'étape 1 ne mentionnait aucun branchement, et
+en effet **rien n'appelait `check_internal_number_available` nulle part**.
+`grep` sur `extensions.py`/`ivr.py` confirmait zéro occurrence -- il restait
+possible de créer Extension 701 + RingGroup 701 + PagingGroup 701 par API
+sans aucun blocage. Corrigé :
+
+- Vérifié en premier lequel des champs `extension` est éditable après
+  création : `ExtUpdate` (extensions.py) et `RingGroupUpdate` (ivr.py) n'ont
+  PAS de champ `extension` -- immuable après création pour ces deux objets,
+  donc seul le `create` avait besoin du branchement. `PagingGroupUpdate`
+  a bien un champ `extension` modifiable -- `update` en avait besoin aussi.
+- `extensions.py` : `create_extension` appelle
+  `check_internal_number_available` juste après la vérification d'unicité
+  existante (username), avant de construire `SIPExtension`.
+- `ivr.py` : `create_ring_group` et `create_paging_group` appellent la même
+  fonction avant de construire l'objet. `update_paging_group` l'appelle
+  avec `exclude_object=("paging_group", str(pg_id))` uniquement si le
+  payload contient un `extension` (`exclude_unset`).
+- `tests/test_numbering_api.py` (nouveau) : 5 tests par vraies requêtes
+  HTTP contre l'app FastAPI (`get_db`/auth surchargés vers la transaction
+  de test), pas des appels directs à `numbering.py` -- create refusé sur
+  collision réelle, create accepté si libre, update accepté en gardant son
+  propre numéro (`exclude_object` prouvé via le vrai endpoint, pas juste la
+  fonction), update refusé sur collision réelle avec un autre objet.
+- Suite complète : 12/12 verts (7 `test_numbering.py` + 5
+  `test_numbering_api.py`).
+
+Étape 1 réellement terminée maintenant, validateur branché ET prouvé branché.
+
+**Étape 2 livrée (2026-08-19)** — CRUD ParkingLot, GO explicite de Philippe,
+exigence principale : mise à jour partielle validée sur l'état final complet
+(pilote + plage fusionnés), jamais sur le seul champ modifié.
+
+- `ivr.py` : `ParkingLotCreate`/`ParkingLotUpdate`/`ParkingLotOut` +
+  `list/create/update/delete_parking_lot` (`GET`/`POST /parking-lots/tenant/{tenant_id}`,
+  `PUT`/`DELETE /parking-lots/{lot_id}`).
+- `_validate_parking_lot_shape` : cohérence interne d'UN lot (start<=end,
+  pilote hors de sa propre plage) -- indépendant des collisions avec les
+  autres objets.
+- `_check_parking_lot_collisions` : appelle `check_internal_number_available`
+  (pilote) + `check_internal_range_available` (plage) sur l'ÉTAT FUSIONNÉ
+  (valeurs actuelles + payload partiel), jamais sur le seul champ envoyé.
+- 9 tests (`test_parking_lot_api.py`), tous par vrai routing HTTP : création
+  (libre, start>end refusé, pilote-dans-sa-plage refusé), modification
+  (le scénario exact de Philippe -- étendre `parking_slots_end` à 730 avec
+  une extension existante à 725 refusé, éditer sans se conflicter
+  soi-même accepté, changer seulement le pilote revalidé contre la plage
+  inchangée), multi-lot (plage/plage, pilote/plage, plage/pilote --
+  toutes les combinaisons demandées).
+- Suite complète : 21/21 verts.
+
+**Point de concurrence identifié, PAS corrigé (demande explicite de
+Philippe : identifier clairement, ne pas construire de table registre) :**
+vérifié qu'aucune sérialisation n'existe nulle part -- `grep` sur tout le
+code pour `FOR UPDATE`/verrou avisoire/`SERIALIZABLE` = zéro résultat. Pire
+que supposé : `\d` sur `sip_extensions`/`ring_groups`/`parking_lots` montre
+qu'il n'y a AUCUNE contrainte unique au niveau DB sur les colonnes de
+numérotation elles-mêmes (`sip_extensions` a une contrainte unique mais
+seulement sur `username`, le composé tenant+numéro -- pas sur `extension`).
+Deux requêtes simultanées sur le même tenant pourraient donc toutes les
+deux constater "libre" avant que l'une des deux n'insère, et créer un vrai
+doublon silencieux -- pas même une erreur, contrairement au cas
+`username` qui aurait au moins un `IntegrityError`. **Dette réelle et
+identifiée, pas hypothétique -- prouvée dans le code ci-dessus** (Philippe,
+2026-08-19 : correction de ma formulation initiale "risque théorique
+faible", qui sous-vendait un problème déjà démontré ; probablement rare
+opérationnellement vu le peu d'admins simultanés par tenant aujourd'hui,
+mais réel techniquement, et le moment le moins coûteux pour le corriger
+serait maintenant que le validateur central existe déjà). Mitigation légère
+suggérée pour plus tard si ça devient un problème :
+un verrou transactionnel Postgres par tenant
+(`pg_advisory_xact_lock(hashtext(tenant_id::text))`) acquis en début de
+create/update sur ce namespace, relâché automatiquement au commit/rollback
+-- pas de nouvelle table, pas de refonte. Pas construit, pas demandé.
+
+Étape 3 (dialplan 700, `valet_park <lot> auto in <min> <max>`) devient
+l'étape suivante logique. Pas de GO donné pour ça encore.
+
+
+**Point bloquant vérifié avant l'étape 3 (2026-08-19, challenge de
+Philippe)** -- namespace des lotname `mod_valet_parking` : GLOBAL au
+processus FreeSWITCH, confirmé dans le source, pas une hypothèse.
+
+- `globals.hash` (mod_valet_parking.c, ~ligne 993) : UNE seule table de
+  hachage au niveau du module, initialisée une fois au chargement -- pas
+  une table par tenant/contexte/domaine.
+- `valet_find_lot(name, create)` (~ligne 66-79) :
+  `switch_core_hash_find(globals.hash, name)` -- recherche par la chaîne
+  brute `lot_name` reçue en argument de `valet_park`, aucun qualificatif de
+  contexte/tenant nulle part dans la clé.
+- `valet_info_function` (l'API de statut, ~ligne 768-813) filtre avec
+  `strcasecmp(cmd, name)` sur cette MÊME table globale, insensible à la
+  casse.
+
+Conséquence concrète : si deux tenants génèrent chacun
+`valet_park parking auto in 701 720` (même lot_name "parking"), ils
+pointent littéralement vers le même objet en mémoire FreeSWITCH -- même
+pool de slots, mêmes jetons partagés entre deux clients différents, malgré
+l'isolation parfaite du dialplan par `tenant_id` côté SIPV. Fonctionnerait
+sans accroc avec un seul tenant de test, catastrophe silencieuse en
+production multi-tenant réelle.
+
+**Stratégie de clé adoptée (proposée par Philippe)** : ne jamais utiliser
+`ParkingLot.name` (modifiable par l'utilisateur) comme lot_name FreeSWITCH.
+Dériver une clé technique stable de l'UUID, distincte du nom affiché :
+
+    Nom affiché ERPCRM (ParkingLot.name)  : "Parking principal"
+    Clé technique FreeSWITCH (dialplan)   : f"tenant_{tenant_id}_parking_{parking_lot_id}"
+
+Règle chaque tenant sur son propre namespace (UUID unique par construction)
+ET règle le problème de stabilité au renommage du même coup : un appel
+stationné sous l'ancienne clé reste valide si `ParkingLot.name` change en
+cours de route, puisque la clé ne dépend jamais du nom. À appliquer dans
+`xml_curl.py` quand le dialplan sera généré (étape 3) -- pas encore
+construit, en attente du GO explicite.
+
+
+**Étape 3 livrée (2026-08-19)** — dialplan du pilote de parcage, GO explicite
+de Philippe, scope volontairement limité : 700 → identification tenant →
+ParkingLot correspondant → clé technique → `valet_park <clé> auto in <start> <end>`.
+Explicitement PAS dans cette étape (demande de Philippe) : plage de reprise
+701-7xx, timeout/orbit, `valet_info`, BLF, provisioning, ERPCRM.
+
+- Vérifié avant de figer le format de clé : `mod_valet_parking.c` --
+  `lot->name = strdup(name)` (pointeur alloué dynamiquement, pas de buffer de
+  taille fixe), aucune restriction de caractères/longueur trouvée dans le
+  source. Un UUID avec tirets est accepté tel quel, aucun encodage
+  alternatif nécessaire.
+- `xml_curl.py` : `_parking_lot_technical_key(tenant_id, lot_id)` →
+  `f"tenant_{tenant_id}_parking_{lot_id}"`, dérivée des UUID, jamais de
+  `ParkingLot.name`. `_parking_dialplan_entries(parking_lots, tenant_id)`
+  génère le bloc `<extension>`/`valet_park ... auto in ...` par lot, appelée
+  dans `_dialplan_internal` avec les `parking_lots` du tenant déjà résolu
+  (même requête filtrée par `tenant_id` que les autres objets).
+- `tests/test_parking_dialplan.py` (nouveau, 4 tests) : sur le XML
+  **réellement généré** par `POST /api/v1/xml_curl` (pas un appel direct à
+  une fonction utilitaire) -- Tenant A/700/701-720 génère la bonne clé et
+  plage ; Tenant B pareil avec sa propre clé ; renommer le lot
+  ("Parking principal" → "Réception") laisse la clé FreeSWITCH strictement
+  identique ; deux tenants avec exactement 700+701-720 génèrent deux clés
+  différentes (et le XML de chacun ne contient PAS la clé de l'autre).
+- Suite complète : 25/25 verts (21 précédents + 4 nouveaux).
+
+**À ne pas perdre pour plus tard (pas résolu maintenant, juste noté)** :
+supprimer un `ParkingLot` pendant qu'un appel y est encore stationné rendrait
+cet appel difficile à récupérer -- l'entrée dialplan correspondante
+disparaîtrait au prochain lookup xml_curl. Aucun mécanisme de vérification
+"appel actif dans ce lot avant suppression" n'existe. À traiter quand on
+arrivera à la suppression/gestion du runtime (probablement autour de l'étape
+7, `valet_info`, qui donnera la visibilité sur les slots occupés).
+
+Étape 4 (dialplan 701-7xx, reprise) devient l'étape suivante logique. Pas de
+GO donné pour ça encore.
+
+
+**Étape 4 livrée (2026-08-19)** — dialplan de la plage 701-7xx (parcage
+direct + reprise), GO explicite de Philippe après clarification du
+comportement métier voulu.
+
+**Comportement confirmé avec Philippe avant de coder** (comportement réel
+observé dans l'UCM, les 2 modes actifs simultanément) : transférer au
+pilote (700) choisit automatiquement le premier slot libre de la plage
+(701, sinon 702, ...) ; transférer ou composer directement un slot (ex.
+703) l'utilise CE slot précisément -- parque l'appel courant s'il est
+libre, reprend l'appel stationné s'il est occupé. C'est exactement le
+comportement natif de `valet_park <lot> <ext>` déjà vérifié dans
+`mod_valet_parking.c` à l'étape 3 -- **aucune logique "retrieve only" à
+fabriquer**, le module fait déjà ça nativement. Les relevés UCM/ScopServ
+(`schema_champs_ucm.md`/`SCHEMA~1.MD`) ne documentaient pas ce comportement
+(ce sont des relevés de champs de configuration, pas des specs
+fonctionnelles) -- tranché par la confirmation directe de Philippe sur le
+fonctionnement réel de son UCM plutôt que par la doc.
+
+- `xml_curl.py` : `_int_range_regex(start, end)` -- alternation simple
+  (`(701|702|...|720)`), pas un algorithme de découpage par chiffre
+  (inutile pour des plages de cette taille, max observé 99 numéros chez
+  ScopServ). `_parking_dialplan_entries` étendue : **une seule** règle
+  dialplan (`<extension>`) pour toute la plage, pas 20 extensions séparées
+  -- `valet_park <clé> $1` (capture de group `$1`, même idiome déjà utilisé
+  ailleurs dans ce fichier pour `voicemail_direct`).
+- `tests/test_parking_dialplan.py` (+2 tests, 6 au total dans ce fichier) :
+  toute la plage 701-720 dans une seule règle (un seul `$1` pour la clé du
+  lot), 701 et 720 dans la regex, 721 absent, 700 (le pilote) absent de la
+  regex des slots ; deux lots (701-720 et 751-760) atteignent chacun
+  exclusivement leur propre lot, aucun chevauchement dans le XML généré.
+- Suite complète : 27/27 verts.
+
+Toujours pas construit (scope inchangé) : timeout/orbit (item 6), reprise
+via `valet_info` (item 7), BLF (item 8), provisioning (item 9), ERPCRM
+(items 10-11). Étape 5 (tests réels fs_cli + téléphones, park/reprise en
+vrai) devient l'étape suivante logique. Pas de GO donné pour ça encore.
+
+
+**Étape 5 en cours (2026-08-19) -- tests réels sur vrais postes (102/103),
+GO Philippe.** TEST 1 (valet auto) et TEST 3 (slot manuel) confirmés
+fonctionnels sur de vrais appels : transfert 700 -> atterrit sur 701 comme
+attendu ; transfert direct 703 -> parque précisément à 703 ; reprise
+fonctionnelle dans les deux cas (bridge audio réel confirmé par Philippe).
+
+**Défaut trouvé pendant le test (pas un défaut du dialplan des étapes
+3-4)** : la musique d'attente repart du début à chaque parcage/reprise
+au lieu de reprendre où elle s'était arrêtée -- Philippe : "comme si
+c'était 2 appels". Cause identifiée dans le code, pas supposée :
+
+- `app/core/moh_hold_tracker.py` (TASK-S058.3) résout déjà exactement ce
+  problème, mais pour le Hold classique -- écoute `CHANNEL_HOLD`/
+  `CHANNEL_UNHOLD`, réécrit `hold_music` avec un offset
+  (`playback::fichier@@position`) lu sur `playback_last_offset_pos`.
+- `valet_park` ne déclenche JAMAIS ces événements. Il a son propre
+  événement custom `valet_parking::info` (confirmé dans
+  `mod_valet_parking.c`) : `Action=hold` au début du parcage (ligne ~687),
+  `Action=exit` à la fin (ligne ~752, retrieval/timeout/hangup confondus),
+  `Action=bridge` à la reprise réussie (ligne ~582). Le tracker n'écoute
+  pas cette classe d'événement -- ne voit jamais un cycle de parcage,
+  `hold_music` n'est donc jamais réécrit avec un offset pour ce cas.
+- Différence structurelle notée : pour le Hold, le tracker doit suivre la
+  position sur le canal du PARTENAIRE (qui joue la MOH pendant que l'autre
+  est en attente). Pour le parcage, c'est le MÊME UUID d'appel qui joue sa
+  propre MOH à chaque cycle (confirmé : `switch_ivr_uuid_bridge` à la
+  reprise bridge le UUID ORIGINAL du token, pas un nouveau canal) --
+  potentiellement plus simple à étendre que prévu : lire
+  `playback_last_offset_pos` sur soi-même entre un `exit` et le `hold`
+  suivant, pas besoin de logique "partenaire".
+
+Pas construit maintenant (Philippe : pas de développement à cette étape,
+seulement des tests réels). Piste pour plus tard : étendre
+`moh_hold_tracker.py` pour s'abonner aussi à `valet_parking::info`
+(`Action=hold`/`Action=exit`) avec la même mécanique d'offset, en lisant la
+position sur le canal lui-même plutôt que sur un partenaire.
+
+
+**Confirmation + point distinct (2026-08-19, même session étape 5)** :
+
+- Philippe confirme le comportement prédit : park/reprise/re-park (via 700
+  ET via transfert direct) -- la MOH repart toujours du début, aucun cas où
+  elle continue. Cohérent avec le diagnostic déjà loggé (`moh_hold_tracker.py`
+  ne couvre pas `valet_parking::info`). Pas de nouvelle info technique, juste
+  confirmation empirique demandée par ChatGPT/Philippe avant de coder --
+  toujours pas corrigé, toujours en attente d'une preuve UUID/offset live
+  (moniteur ESL déployé, voir plus bas) avant de toucher au tracker.
+
+- **Nouveau point distinct** : délai de 1-2 secondes avant que la MOH
+  démarre au moment du transfert, décrit par Philippe comme "désagréable".
+  Vérifié dans `xml_curl.py` (~ligne 298-312) : un silence de **500ms est
+  déjà intentionnellement inséré** (`silence_stream://500` avant la chaîne
+  de fichiers MOH) -- décision documentée de longue date (TASK-S033/S058),
+  motif à l'époque : "ça commence trop raide". Ce n'est PAS un bug, c'est du
+  comportement voulu. Mais 500ms n'explique pas un délai perçu de 1-2
+  secondes -- le reste est vraisemblablement de la latence de signalisation
+  SIP (re-INVITE hold/transfert, renégociation codec), pas confirmé
+  précisément faute de capture SIP en direct au moment du geste. Noté
+  séparément du problème de continuité MOH -- deux points distincts, ne pas
+  les confondre en cherchant une seule cause.
+
+Toujours aucune correction apportée -- Philippe : pas de développement à
+cette étape, seulement des tests réels et des constats.
+
+
+**Exigence produit précisée (2026-08-19, Philippe)** : l'annonce du slot de
+parcage (`valet_announce_ext`) ne doit jouer QUE pour un transfert attended
+(non-blind) -- celui qui fait le transfert doit entendre où l'appel a été
+parké. Pour un transfert blind, Philippe ne veut PAS entendre l'annonce.
+
+Levier technique confirmé dans le source : `valet_announce_slot` est une
+variable de CANAL, positionnable par appel (`switch_true(...)` lu juste
+avant l'exécution de `valet_park`, ligne ~446-447 de
+`mod_valet_parking.c`) -- pas un réglage global du module. Contrôlable donc
+en théorie par appel/scénario.
+
+**Pas encore vérifié (à faire avant d'implémenter, pas supposé)** : quel
+canal exécute réellement `valet_park` dans un vrai transfert BLIND sur les
+postes Grandstream utilisés ici -- celui de la personne qui transfère, ou
+celui de l'appelant original redirigé. Si c'est ce dernier (hypothèse la
+plus probable pour un blind transfer classique via REFER), c'est
+justement l'appelant/l'autre partie qui entendrait l'annonce si elle
+était activée globalement -- pas la personne qui a fait le transfert. Il
+faudrait donc distinguer les deux cas de transfert au niveau du dialplan
+(poser `valet_announce_slot` différemment selon le contexte d'arrivée),
+pas un simple interrupteur global sur `_parking_dialplan_entries`.
+
+Dépend aussi de la macro `valet_announce_ext` manquante en français (voir
+plus haut, `[ERR] Can't find macro valet_announce_ext`) -- rien
+d'utilisable tant que cette macro n'existe pas de toute façon. Pas
+construit maintenant.
+
+
+**Correctif appliqué (2026-08-19)** — 500ms retiré des vrais appels,
+déplacé vers les chemins de préécoute. GO explicite de Philippe après 3
+confirmations que ce délai n'avait jamais sa place sur un vrai appel.
+
+- `xml_curl.py` (`hold_music_var`) : `silence_stream://500!` retiré --
+  `hold_music` pointe directement sur le(s) fichier(s) MOH, plus de préfixe.
+  Confirmé en direct sur le service redémarré (`curl` sur `/api/v1/xml_curl`
+  section=directory) : `hold_music` ne contient plus `silence_stream`.
+- `moh.py` (`call_moh`, préécoute MOH) : `originate_app` joue maintenant
+  `file_string://silence_stream://500!<fichier>` -- compense le temps de
+  décrocher avant que ça commence à jouer.
+- `prompts.py` (`call_prompt`, préécoute phrases) : même traitement.
+- Services `sipv-backend`/`sipv-backend-tls` redémarrés, confirmés actifs.
+
+Rien d'autre touché dans ce correctif -- le parcage (700/701-720),
+`moh_hold_tracker.py`, `valet_announce_slot` restent inchangés.
+
+
+**ÉTAT CONSOLIDÉ AVANT COMPRESSION (2026-08-19, fin de session étape 5)** --
+récapitulatif volontairement complet pour ne rien perdre. Le CRUD +
+dialplan (étapes 1-4) sont terminés et testés en vrai. Étape 5 (tests
+réels) a fait émerger 4 problèmes distincts, statuts différents :
+
+**1. Délai 500ms sur la MOH réelle -- RÉSOLU, vérifié en direct.**
+`silence_stream://500` retiré de `hold_music_var` (`xml_curl.py`), déplacé
+vers `call_moh` (`moh.py`) et `call_prompt` (`prompts.py`) où il compense
+le temps de décrocher en préécoute. Services redémarrés, confirmé par
+`curl` direct sur `/api/v1/xml_curl` : `hold_music` ne contient plus
+`silence_stream`. Philippe a testé après coup : un délai a été observé
+UNE FOIS (premier test après redémarrage seulement, pas les suivants) --
+probablement un effet de démarrage à froid (cache fichier/codec), pas
+confirmé comme un problème persistant. À surveiller si ça revient.
+
+**2. MOH qui repart du début à chaque park/reprise -- PAS RÉSOLU, mauvais
+protocole de test identifié, vrai test pas encore fait.**
+Diagnostic de départ : `moh_hold_tracker.py` (TASK-S058.3) résout ce
+problème pour le Hold classique (CHANNEL_HOLD/CHANNEL_UNHOLD) mais
+n'écoute pas `valet_parking::info` (l'événement custom de `valet_park`) --
+donc jamais de reprise de position pour un parcage. Pas encore étendu,
+sur demande explicite de Philippe/ChatGPT : prouver d'abord en runtime
+avant de toucher au code.
+**Erreur de méthode trouvée en regardant les logs** : tous les tests faits
+jusqu'ici (composer 700, puis 701, 702, 703 depuis différents postes)
+sont chacun des APPELS NEUFS INDÉPENDANTS -- confirmé par les UUID dans
+`freeswitch.log`, un UUID différent à chaque tentative, même deux appels
+consécutifs du même poste 102. Aucun de ces tests n'a donc jamais testé
+la vraie continuité (un même appel vivant parké, récupéré, PUIS re-parké
+une deuxième fois). Le bon protocole, proposé et pas encore exécuté :
+  1. Poste A appelle poste B (vrai appel, décroché des deux côtés)
+  2. B transfère cet appel vers 700 (A entend la MOH, park réel)
+  3. B récupère au slot indiqué (A et B reconnectés)
+  4. B transfère ENCORE ce même appel vers un autre slot (ex. 703)
+  5. Observer si la MOH reprend sa position à cette 2e mise en attente,
+     et si c'est le même UUID qui repasse par `valet_park`
+Nécessite seulement 2 postes (A et B), pas de 3e poste. **C'est le
+prochain test concret à faire.**
+
+**3. Annonce du slot ("appel stationné au 703") -- PAS RÉSOLU, piste
+trouvée, pas confirmée par comparaison.**
+Exigence produit claire (Philippe) : annonce audible SEULEMENT pour un
+transfert attended/supervisé (celui qui parque doit savoir où) ; AUCUNE
+annonce pour un transfert blind (le client transféré ne doit rien
+entendre). Le serveur doit distinguer ça par les événements/variables
+SIP-FreeSWITCH réels, jamais par la configuration du bouton (même
+destination 700 des deux côtés).
+Levier technique confirmé : `valet_announce_slot` (variable de canal,
+`switch_true()` lu juste avant l'exécution de `valet_park`,
+`mod_valet_parking.c` ~ligne 446-447) -- contrôlable par appel.
+Piste trouvée dans un test de BLIND transfer (log FreeSWITCH,
+2026-08-19 ~22:19-22:28, UUID `7cac46a4-700a-4b05-a658-66dde0d7da41`) :
+`[DEBUG] Application valet_park Requires media! pre_answering channel` --
+le canal qui atteint `valet_park` pour ce blind transfer n'était PAS
+ENCORE répondu (FreeSWITCH a dû le pré-répondre lui-même). Signal
+candidat pour distinguer blind (pre_answering) vs attended (déjà répondu,
+poste qui consulte activement) -- **PAS CONFIRMÉ**, le test attended
+correspondant n'a pas été capturé proprement (Philippe a testé le speed
+dial 700, qui saisit une 2e ligne -- comportement du poste, pas du
+serveur -- puis a enchaîné sur le bouton "monitored park" sans qu'on ait
+comparé les deux logs côte à côte). Aucune annonce entendue dans aucun
+test jusqu'ici de toute façon, mais expliqué par un problème séparé
+(voir macro manquante, point suivant) -- ne prouve donc rien sur la
+distinction blind/attended, juste que l'annonce ne fonctionne pas du tout
+en ce moment.
+**Défaut séparé trouvé en chemin** : `[ERR] switch_ivr_play_say.c:145
+Can't find macro valet_announce_ext` -- la phrase d'annonce n'est définie
+que dans certains packs de langue (`en/vm/sounds.xml` et quelques autres),
+PAS dans `lang/fr/` (vérifié : aucun fichier sous `lang/fr/` ne définit
+`valet_announce_ext`). Tant que cette macro n'existe pas en français,
+aucune annonce n'est audible, peu importe blind/attended -- à corriger
+avant que la distinction blind/attended ait de l'importance pratique.
+**Prochain test concret nécessaire** : refaire un blind ET un attended
+PROPREMENT comparables (même scénario, un seul poste qui transfère à
+chaque fois si possible) en capturant les deux `uuid_dump`/logs côte à
+côte, pas des tests décousus.
+
+**4. BLF 701/702/703 ne s'allume pas -- PAS RÉSOLU, hypothèses non
+confirmées, capture jamais réussie.**
+Confirmé dans le source : `valet_send_presence` publie DEUX présences --
+une globale par lot (clé = lot_name, sans intérêt pour du BLF par slot) ET
+une PAR SLOT (clé = `token->ext`, ex. "701", statut Holding/Active/Empty)
+-- donc le mécanisme par-slot existe nativement, la clé technique UUID de
+l'étape 3 n'est PAS en cause.
+Hypothèse non confirmée : le domaine utilisé dans `from`/`login`
+(`token->ext@domain_name`) vient de `switch_core_get_domain(SWITCH_TRUE)`,
+une fonction qui lit la config XML statique -- or SIPV n'a AUCUN domaine
+statique déclaré (tout est dynamique via `mod_xml_curl`). Si cette
+fonction ne trouve rien, le module retombe sur `cluecon.com` en dur.
+Vérifié séparément : Kamailio (`/etc/kamailio/kamailio.cfg`) n'a AUCUNE
+règle spécifique pour SUBSCRIBE/NOTIFY/presence, mais son routage est
+générique (tout ce qui n'est ni REGISTER ni in-dialog est relayé vers
+FreeSWITCH via `$du`) -- probablement pas un blocage, mais pas garanti.
+**Aucune preuve empirique obtenue** : un moniteur ESL a été construit
+(`/tmp/valet_event_monitor.py` sur le serveur SIPV, TOUJOURS EN COURS
+D'EXÉCUTION au moment d'écrire cette entrée, PID variable -- relancer si
+besoin, source dans les messages de cette session) pour capturer les
+événements `PRESENCE_IN` bruts. Un premier bug de syntaxe ESL (mélange
+d'un abonnement CUSTOM avec d'autres types d'événements dans la même
+commande FreeSWITCH -- jamais matché) a été trouvé et corrigé (deux
+commandes `event plain` séparées maintenant). Malgré la correction, aucun
+événement n'a encore été capturé dans le log du moniteur pendant les
+tests suivants -- soit parce qu'aucun park récent n'a coïncidé avec une
+fenêtre d'écoute active du moniteur, soit un bug résiduel non identifié.
+**Prochaine étape concrète** : relancer proprement le moniteur juste avant
+un park réel, confirmer qu'il capture au moins UN événement
+`valet_parking::info`, PUIS chercher le `PRESENCE_IN` correspondant.
+
+**Fichiers modifiés aujourd'hui (SIPV)** : `app/core/numbering.py` (nouveau),
+`app/api/v1/endpoints/ivr.py`, `app/api/v1/endpoints/xml_curl.py`,
+`app/api/v1/endpoints/moh.py`, `app/api/v1/endpoints/prompts.py`,
+`tests/conftest.py` (nouveau), `tests/test_numbering.py` (nouveau),
+`tests/test_numbering_api.py` (nouveau), `tests/test_parking_lot_api.py`
+(nouveau), `tests/test_parking_dialplan.py` (nouveau), `pytest.ini`
+(nouveau), `requirements.txt`. DB `sipv_test` créée (migrations à jour).
+`ParkingLot` de test créé sur la vraie DB `sipv` pour le tenant t1001
+(id `3149ebd9-8002-424f-871e-6359a4052e5b`) -- PAS encore nettoyé, à
+supprimer avant mise en prod réelle si ce n'est pas un lot destiné à
+rester.
+
+
+**Capture décisive (2026-08-19, moniteur corrigé + SIP trace activé,
+`sofia global siptrace on`)** -- appel continu unique tracé de bout en bout
+(103 appelle 102, park 701, reprise, re-park 702, reprise, raccroché).
+
+**1. Blind transfer confirmé au niveau protocole** : `Refer-To: <sip:700@
+192.168.1.55:5061>`, AUCUN paramètre `Replaces` -- vrai blind transfer,
+pas une supposition basée sur le bouton du téléphone.
+
+**2. Le correctif du 500ms fonctionne réellement, vérifié à la milliseconde** :
+`Callstate Change ACTIVE -> HELD` à 22:56:21.271537, `playback(file_string://
+...moh...wav)` démarre à 22:56:21.431542 -- 0.4 seconde. Le délai que
+Philippe entend n'est PAS un retour du 500ms.
+
+**3. D'où vient le délai perçu (2-4 sec), nouvelle hypothèse plus précise** :
+- `REFER` traité à 21.611537 (`Transfer ... to XML[700@internal-t1001]`)
+- Cascade de changements d'état FreeSWITCH (CS_ROUTING/CS_EXECUTE/...)
+- Erreur macro `valet_announce_ext` à 23.191516 (+1.58s après le REFER)
+- Park confirmé (présence Holding sur 701) à 26.276 (+4.6s après le REFER)
+Le canal joue donc DEUX FOIS le MOH dans la même séquence : une fois très
+vite via le hold générique (0.4s, correctif OK), puis `valet_park` reprend
+le contrôle du canal ~4s plus tard et relance SA PROPRE lecture depuis
+zéro (boucle interne `switch_ivr_play_file` du module, indépendante du
+hold générique). Hypothèse la plus probable : ce que Philippe perçoit
+comme "un gros délai puis ça recommence" est ce DOUBLE départ, pas un
+retard unique. Pas encore isolé lequel des deux facteurs (macro manquante
+vs cascade de signalisation SIP native au REFER) domine dans le ~3s
+restant après la macro -- pas creusé plus loin, rendement décroissant.
+
+**4. Preuve de continuité UUID obtenue (répond à la demande de Philippe/
+ChatGPT avant de toucher moh_hold_tracker.py)** : `variable_call_uuid` =
+`0077f700-8560-4744-bbfe-0def8e100a40` reste identique tout du long --
+park (701) -> reprise -> re-park (702) -> reprise -> raccroché. Seul le
+UUID du RETRIEVER (102, qui redial à chaque fois) change
+(`733ed1b8`→`16562862`→`f978a721`), jamais celui de l'appelant parké
+(103). Confirme empiriquement que `moh_hold_tracker.py` peut suivre ce
+même identifiant stable pour étendre son mécanisme d'offset à
+`valet_parking::info` (Action=hold/exit), comme prévu. **Toujours pas
+codé** -- cette preuve était le préalable demandé, pas encore la
+correction elle-même.
+
+**Explication "2 callers" du tour précédent, clarifiée par Philippe** :
+comme le blind transfer + BLF cassé ne donnent aucune indication du slot
+choisi, Philippe a essayé un mauvais slot au moins une fois pendant les
+tests précédents -- composer un slot VIDE le parque réellement dedans
+(comportement natif de `valet_park`, déjà documenté). Donc le "2 callers"
+observé plus tôt peut être un vrai deuxième appel accidentel, pas
+nécessairement le jeton-jamais-nettoyé théorisé par Claude. Les deux
+explications restent plausibles séparément, pas encore départagées par
+timestamp précis -- pas bloquant, à garder en tête si ça revient.
+
+Outils encore actifs sur le serveur : `sofia global siptrace on` (À
+DÉSACTIVER avec `sofia global siptrace off` si oublié -- génère beaucoup
+de volume de log), moniteur ESL `/tmp/valet_event_monitor.py` (abonnement
+`ALL` filtré côté script, version qui fonctionne, capture
+`Unique-ID`/`Other-Leg-Unique-ID`/`variable_call_uuid`/etc. sur les
+événements pertinents).
+
+
+**Correctif annonce blind livré (2026-08-19)** -- `valet_announce_slot=false`
+sans condition sur le pilote 700, GO explicite de Philippe après vérification
+complète (pas de supposition) : `switch_ivr_sleep(session, 1500, ...)`
+confirmé ligne par ligne dans `mod_valet_parking.c` juste avant
+`valet_announce_ext`, dans les deux branches, dès que `play_announce` est
+vrai (défaut). `confirm-blind-transfer` (paramètre Sofia réel, vérifié dans
+`sofia.c`) écarté -- ne change pas blind/attended, juste le traitement d'un
+blind REFER déjà reçu, pas notre problème. Nouveau champ `ParkingLot.announce_slot`
+(migration `0063_parking_lot_announce`, défaut `false`) -- plus jamais
+hardcodé, piloté par lot. Vérifié en direct sur le dialplan réellement servi.
+Pas de distinction blind/attended automatique construite -- un seul réglage
+par lot pour l'instant, signal `sip_replaces_call_id` confirmé disponible
+pour plus tard si besoin. `sofia global siptrace` désactivé après usage.
+
+**Portion Parcage construite dans ERPCRM le même jour (2026-08-19), GO
+explicite de Philippe** -- pendant que tout est encore frais, plutôt que
+remis à plus tard :
+
+- `sipv_client.py` : `list/create/update/delete_parking_lot`, même patron
+  que `ring_group`.
+- `companies.py` : proxy `/{company_id}/parking-lots[...]`, avec
+  `_forward_sipv_error()` (nouveau helper) qui propage le VRAI message
+  d'erreur de SIPV (ex. collision de numérotation) au lieu d'un générique
+  "SIPV injoignable" -- testé en direct, un `POST` en collision retourne
+  bien `400 "Numéro pilote 700 déjà utilisé par parking_lot_pilot (700)"`
+  à travers tout le chemin ERPCRM → SIPV.
+- `CompanyDetail.jsx` : nouveau composant `ParkingLotsSection` (Téléphonie,
+  après Groupes de paging) -- liste des lots par compagnie, création,
+  édition inline (nom, annonce), suppression. Champs exposés : nom,
+  pilote, plage (début/fin), timeout, extension de retour, annonce du
+  slot. La clé technique FreeSWITCH (`tenant_{id}_parking_{lot_id}`) reste
+  complètement invisible à l'utilisateur, jamais affichée.
+- Explicitement PAS construit (rien de simulé) : statut live (`valet_info`
+  pas encore un endpoint SIPV), BLF, continuité MOH -- aucune colonne
+  "slot occupé" ni indicateur live dans l'écran, pour ne pas prétendre
+  qu'un état fonctionne alors que le backend correspondant n'existe pas.
+- Vérifié de bout en bout avec un vrai token (`admin@simpleip.ca`, seed
+  dev) : `GET` liste, `POST` collision → 400 avec le bon détail. `npm run
+  build` propre. Backend ERPCRM + frontend redémarrés
+  (`erpcrm-frontend.service`, jamais `sudo` -- règle du projet).
+
+Réutilise entièrement les règles déjà construites côté SIPV (collision de
+numéros, plages, chevauchements, update partiel, isolation tenant) --
+aucune logique de validation dupliquée côté ERPCRM.
+
+
+**Corrections d'architecture + options manquantes (2026-08-19, même
+session, GO Philippe -- retour direct sur le problème identifié au tout
+début de cette conversation : placer les choses au bon endroit, pas juste
+les empiler).**
+
+1. **`ParkingLotsSection` sortie de `CompanyDetail.jsx`** (3300+ lignes,
+   exactement le monolithe critiqué au début) vers
+   `frontend/src/pages/telephony/ParkingLotsSection.jsx` -- premier
+   morceau d'une arborescence par domaine, volontairement pas un big-bang :
+   le reste des sections téléphonie (RingGroups, PagingGroups, Trunk...)
+   reste pour l'instant dans `CompanyDetail.jsx`, à migrer au fil du temps
+   ("même vide, on va le remplir tranquillement" -- Philippe). Import
+   propre (`import ParkingLotsSection from './telephony/ParkingLotsSection'`),
+   `npm run build` propre (130 modules), vérifié en direct après
+   redémarrage.
+
+2. **`ParkingLot.is_active` ajouté** (migration `0064_parking_lot_active`,
+   défaut `true`) -- manquait, repéré par Philippe en revoyant l'écran.
+   Cohérent avec le reste du projet (jamais de create-only, voir mémoire
+   `feedback_always_editable`) -- désactiver un lot sans le supprimer.
+   `_dialplan_internal` (xml_curl.py) filtre maintenant
+   `ParkingLot.is_active == True` avant de générer le dialplan -- un lot
+   désactivé disparaît du dialplan réel sans perdre sa configuration.
+   `numbering.py` ne filtre PAS par `is_active` (vérifié -- comportement
+   déjà cohérent avec Extension/RingGroup/PagingGroup, un objet inactif
+   continue de réserver son numéro, pas de collision surprise à la
+   réactivation). Vérifié en direct via le proxy ERPCRM (`is_active: true`
+   dans la réponse réelle).
+
+**Backlog identifié, PAS construit -- annonce du slot via TTS/Voicebox
+(demande de Philippe, à ne pas perdre) :**
+
+Le problème de fond : `valet_announce_ext` est une macro FreeSWITCH
+compilée en dur dans `mod_valet_parking.c`
+(`switch_ivr_phrase_macro(session, "valet_announce_ext", tmp, NULL, NULL)`)
+-- elle n'existe pas en français (`lang/fr/`), donc `announce_slot=true`
+ne peut aujourd'hui produire aucun son utilisable pour un tenant
+francophone, peu importe ce qu'on règle côté SIPV. Philippe propose
+d'utiliser le même mécanisme déjà construit pour les prompts IVR et la
+MOH (génération TTS via Voicebox, `prompts.py`/`moh.py`,
+`call_prompt`/`call_moh`) plutôt que de dépendre du système de macros de
+FreeSWITCH. Deux façons concrètes d'y arriver, ni l'une ni l'autre
+commencée :
+
+- **Option A** -- fournir la macro manquante : créer une vraie définition
+  `valet_announce_ext` dans `lang/fr/vm/sounds.xml` (ou équivalent)
+  pointant vers un fichier généré par Voicebox. Garde le mécanisme natif
+  du module (`switch_ivr_phrase_macro`), donc le comportement/timing déjà
+  observé (sleep 1500ms inclus) reste identique -- juste le son change.
+  Plus simple, mais reste dépendant du système de macro FreeSWITCH (une
+  seule phrase générique "vous êtes stationné au poste X", pas de contrôle
+  fin par lot/tenant).
+- **Option B** -- contourner le mécanisme natif : ne jamais activer
+  `announce_slot` côté `mod_valet_parking` (rester à `false` en
+  permanence), et construire une annonce personnalisée déclenchée depuis
+  SIPV lui-même en écoutant l'événement `valet_parking::info` (déjà
+  capturé dans cette session, `Action=hold`) -- jouer un fichier
+  TTS/enregistré propre à SIPV vers la bonne partie via ESL, sans passer
+  par la macro FreeSWITCH du tout. Plus de travail (nouveau mécanisme de
+  lecture, plus de contrôle sur QUI entend quoi -- pertinent pour la
+  distinction blind/attended pas encore câblée), mais évite complètement
+  la dépendance aux macros de langue FreeSWITCH.
+
+Philippe veut aussi pouvoir voir si les fichiers d'annonce existent ou non,
+et les enregistrer directement avec le module de voix (Voicebox) --
+cohérent avec l'Option B (des fichiers gérés par SIPV/ERPCRM, pas des
+macros FreeSWITCH invisibles). Aucune décision prise entre A et B --
+nécessite un GO explicite avant de commencer, et une discussion sur le
+scope exact (une annonce par lot ? par tenant ? texte personnalisable ?).
+
+Toujours dans le backlog signalé par Philippe (pas construit) : d'autres
+options de parcage potentiellement manquantes à l'écran -- à clarifier
+lesquelles précisément lors d'une prochaine session (le "nombre de
+secondes avant le rappel du poste" existe déjà sous
+`timeout_seconds`/`return_extension`, à confirmer si ça couvre bien ce que
+Philippe avait en tête ou si un champ distinct manque encore).
+
+
+**Raffinements écran Parcage + arborescence élargie (2026-08-20, même
+session, demandes directes de Philippe) :**
+
+1. **`timeout_seconds` maintenant modifiable en ligne** dans le tableau
+   (auparavant réglable seulement à la création). Vérifié de bout en bout
+   (`PUT` réel, `timeout_seconds: 90` reflété dans la réponse).
+
+2. **`return_extension` transformé en vrai choix** (menu déroulant des
+   postes réels de la compagnie, `sipExts`) au lieu d'un champ texte libre.
+   Vérifié de bout en bout (`return_extension: "102"` reflété).
+   **PAS construit, demande explicite de Philippe non réalisable
+   maintenant** : option "poste qui a fait le park" (retour dynamique vers
+   celui qui a transféré, plutôt qu'une extension fixe par lot). Ça
+   demanderait de suivre, PAR APPEL, qui a initié le transfert -- rien
+   dans SIPV ne capture ça aujourd'hui (le champ `return_extension` est
+   une propriété du LOT, pas de l'appel). Piste technique la plus proche :
+   `Referred-By` (header SIP déjà vu dans la capture REFER de cette
+   session) pourrait porter cette info, mais il faudrait la capturer à
+   l'entrée dans `valet_park` et la propager dynamiquement à
+   `valet_parking_orbit_exten` -- pas fait, nécessite un vrai GO et du
+   temps de conception, pas juste un menu déroulant.
+
+3. **Annonce liée à la langue du POSTE, pas de la compagnie -- backlog
+   affiné, pas construit.** Philippe précise : si un poste anglais est
+   dans une compagnie francophone, c'est SA langue à lui qui doit jouer,
+   pas celle de la compagnie. Ça affine (sans le remplacer) le backlog
+   TTS/Voicebox déjà noté plus haut dans cette même entrée -- les options
+   A et B décrites là-bas doivent toutes les deux résoudre la langue au
+   niveau du POSTE qui écoute l'annonce (probablement via la même chaîne
+   de résolution que `phone_option_defaults`/`resolve_setting()` déjà
+   utilisée ailleurs pour la langue d'un poste), pas au niveau du
+   `ParkingLot`/tenant. Toujours aucun GO, toujours pas construit.
+
+4. **Arborescence visible élargie** -- Philippe a demandé confirmation que
+   TOUTES les branches de l'arborescence identifiée plus tôt dans la
+   session étaient présentes, même vides, pas seulement celles avec du
+   code fonctionnel. Ajouté : 7e sous-onglet **"Urgence & Sécurité"** --
+   Adresses E911 (note : toujours gérées dans l'onglet "Informations" de
+   la compagnie, pas encore déplacées ici -- pas fait ce soir, décision
+   pas prise), Fax/SMS/Sécurité en placeholders explicites ("pas encore
+   construit côté SIPV", avec les noms de modèles existants). 7 branches
+   au total maintenant : Numéros, Postes, Acheminement d'appels, Horaires
+   & Audio, Appareils, Urgence & Sécurité, Avancé.
+
+`npm run build` propre à chaque étape, service frontend redémarré et
+vérifié actif (HTTP 200) après chaque changement.
+
+
+**INCIDENT (2026-08-20) -- appels cassés en production, causé et corrigé
+dans cette session.**
+
+Cause : commentaire XML ajouté dans `_parking_dialplan_entries`
+(`xml_curl.py`) contenant `--` à l'intérieur du commentaire
+(`<!-- ... -- ... -->`), invalide en XML (un commentaire ne peut contenir
+`--` qu'au tout début/fin). Résultat : `[ERR] switch_xml.c: unclosed
+<!--` -> `Context internal-t1001 not found` -> plus AUCUN appel ne
+routait pour ce tenant, tout tombait sur le catch-all busy. Philippe a
+perdu la capacité de faire des appels pendant un moment avant qu'on le
+repère.
+
+Corrigé : le commentaire fautif retiré. **Deuxième occurrence du même
+défaut trouvée et corrigée en même temps**, préexistante (pas de cette
+session) : `_ringgroup_dialplan_entries`, commentaire
+"(ferme -- horaire)" sur un ring group fermé par horaire -- même bug
+latent, aurait cassé le dialplan au prochain ring group fermé avec ce
+code atteint. Corrigé en "(ferme, hors horaire)".
+
+**Risque systémique identifié, PAS entièrement audité** : n'importe quel
+nom saisi par un utilisateur (nom de lot, de ring group, de paging group,
+etc.) qui contiendrait littéralement `--` casserait le dialplan complet
+de la même façon, puisque ces noms sont interpolés directement dans des
+commentaires XML (`xe()` échappe pour un contexte XML texte/attribut
+normal, mais PAS spécifiquement pour la sécurité des commentaires). Pas
+audité au complet ce soir faute de temps -- à faire : soit ne plus jamais
+mettre de données saisies par l'utilisateur dans un commentaire XML, soit
+échapper spécifiquement les `--` partout où c'est fait. Prochaine session,
+priorité avant tout nouveau développement sur le dialplan.
+
+Vérifié après coup : XML validé programmatiquement (`xml.etree.ElementTree`),
+`reloadxml` forcé, testé avec un vrai appel (103->102, park réel via 700) --
+fonctionne.
+
+**Preuve obtenue pour "poste qui a parké" (retour dynamique) -- CONFIRMÉ
+sur une vraie trace, pas seulement le source, comme demandé par
+Philippe/ChatGPT avant de choisir un mécanisme.**
+
+Sur l'appel réel ci-dessus (103 parké par 102 vers 700, canal
+`3090aa2f-924a-432b-8837-2bd09332278c`) :
+
+    uuid_getvar sip_h_Referred-By                → <sip:t1001-102@192.168.1.55:5061>  ✅ PRÉSENT ET CORRECT
+    uuid_getvar sip_referred_by_user_stripped     → _undef_                            ❌ PAS peuplé dans ce cas
+
+Donc le signal fiable est `sip_h_Referred-By` (en-tête brut, nécessite un
+parsing léger pour extraire `t1001-102` de `<sip:t1001-102@...>`), PAS
+`sip_referred_by_user_stripped` comme espéré au départ -- cette dernière
+variable existe dans le source (`sofia.c` ~ligne 11107-11122) mais ne se
+peuple pas dans ce chemin de code précis (transfert interne via REFER),
+probablement réservée à un autre scénario (INVITE entrant avec
+Referred-By).
+
+**Reclassification demandée par Philippe, actée** : "poste qui a parké"
+n'est PAS une option facultative -- c'est le comportement de référence
+(UCM par défaut, ScopServ le seul mode) que SIPV doit reproduire.
+`return_extension` statique doit devenir un FALLBACK éventuel, pas le
+mécanisme principal.
+
+**Toujours pas construit** (mécanisme prouvé, pas implémenté) -- nécessite :
+1. Capturer `sip_h_Referred-By` au moment où `valet_park` s'exécute
+   (`Action=hold` sur `valet_parking::info`, ou directement dans le
+   dialplan avant l'action `valet_park`).
+2. Parser le username (`t1001-102` -> `102`).
+3. Poser dynamiquement `valet_parking_orbit_exten` (variable déjà
+   confirmée fonctionnelle à l'étape 3-4) vers ce poste AVANT l'entrée
+   dans `valet_park`, plutôt qu'un `return_extension` statique par lot.
+4. `return_extension` du `ParkingLot` devient le fallback si
+   `sip_h_Referred-By` est absent/invalide.
+
+Pas de GO donné pour construire ce soir -- session très longue, un
+incident de production déjà géré, recommandation de s'arrêter ici plutôt
+que d'enchaîner un changement de dialplan de plus.
+
+
+**Suite -- "poste qui a parké" CONSTRUIT et vérifié en direct (2026-08-20,
+GO donné après la section ci-dessus, dans la même nuit).**
+
+`_parking_orbit_and_timeout_actions()` ajoutée dans `xml_curl.py` :
+`valet_parking_orbit_exten` statique (`return_extension` du lot) posé en
+premier, puis surchargé par une `<condition field="${sip_h_Referred-By}"
+expression="sip:{account}-([^@]+)@" break="never">` qui extrait le poste
+via `$1` -- `break="never"` explicitement posé (le défaut FreeSWITCH pour
+une `<condition>` imbriquée est `break="on-false"`, confirmé dans
+`mod_dialplan_xml.c` -- sans ce `break`, un `Referred-By` absent aurait
+silencieusement sauté `valet_park` au complet, pas juste l'orbite). Testé
+en direct : timeout réel déclenché, rappel du poste qui avait parké,
+réponse et reconnexion à l'appel parqué -- fonctionne.
+
+`announce_slot` : fixé à `valet_announce_slot=false` inconditionnellement
+sur les deux extensions de parcage (pas de détection blind/attendu -- seul
+le blind transfer est utilisé chez Philippe, confirmé). Le macro
+`valet_announce_ext` reste de toute façon cassé en français (backlog TTS
+plus haut, toujours pas construit).
+
+**ESL CUSTOM valet_parking::info -- mystère résolu (2026-08-20), PAS un
+bug FreeSWITCH/ESL, un bug de décodage dans mon propre code.**
+
+Symptôme : `moh_hold_tracker.py` (extension MOH pour le parcage,
+`_handle_valet_hold`/`_handle_valet_exit`) ne réagissait jamais, comme si
+l'événement `CUSTOM valet_parking::info` n'était jamais livré malgré un
+abonnement explicite (`event plain CUSTOM valet_parking::info`, en plus de
+`ALL`). Recherche demandée explicitement par Philippe dans le source
+plutôt que par essais-erreurs ("freeswitch est super documenté, va
+chercher l'info").
+
+Preuve obtenue via un moniteur de diagnostic (`/tmp/valet_event_monitor.py`
+sur le serveur, ESL brut) pendant un vrai test de park (103 parké par 102
+vers 700, slot 701) : l'événement **est bien livré**, avec
+`Event-Subclass: valet_parking%3A%3Ainfo` (`Action: hold`, puis `bridge`,
+puis `exit` à la reprise) -- mais encodé en URL par FreeSWITCH dans le
+format `event plain` (`::` -> `%3A%3A`, espaces -> `%20`, `@` -> `%40`,
+etc.). `_parse_event_body()` dans `moh_hold_tracker.py` ne décodait jamais
+ces valeurs, donc la comparaison `Event-Subclass == "valet_parking::info"`
+échouait toujours silencieusement -- aucun rapport avec l'abonnement ESL
+lui-même (qui fonctionnait correctement depuis le début).
+
+Corrigé : `_parse_event_body()` applique maintenant `urllib.parse.unquote`
+sur chaque valeur. `sipv-backend` + `sipv-backend-tls` redémarrés
+immédiatement (règle du projet).
+
+**Pas encore fait** : reconfirmer sur un vrai cycle park -> reprise ->
+re-park que `valet_hold_music` se met bien à jour avec l'offset
+maintenant que le décodage est corrigé (le dernier test réel de Philippe
+juste avant ce fix n'a pas pu le vérifier -- ancien code encore actif à ce
+moment-là). Point notable trouvé dans le même log : le pilote `700 auto in
+701 720` pose lui-même `valet_hold_music` (au fichier MOH de base) via une
+ré-invocation interne (`inline_destination`) AVANT d'atteindre le slot --
+donc un re-park via le PILOTE (700) plutôt que le slot direct pourrait
+écraser l'offset préparé par `_handle_valet_exit`. À vérifier sur le
+prochain test réel si la continuité casse spécifiquement dans ce cas.
+
+
+**Incident + correction infra -- redémarrages `sipv-backend` faisaient tomber des postes (2026-08-20).**
+
+Pendant les tests de parcage/MOH ci-dessus, un `systemctl restart sipv-backend`
+a coïncidé exactement avec un REGISTER/SUBSCRIBE (BLF park) du poste 102 --
+FreeSWITCH n'a reçu aucune réponse XML-curl pendant le trou de service,
+conclu `Can't find user [t1001-102@sipv]`, rejeté le poste (log
+`sofia_reg.c:3210`). Même symptôme retrouvé la veille (2026-08-19 23:24:39)
+-- pas un cas isolé. Confirmé dans le source `mod_xml_curl.c` (pas supposé) :
+aucun cache, aucun fallback multi-URL -- `url = val`, une seule valeur par
+binding. `xml_curl.conf.xml` : `timeout=10`, gateway unique vers
+`127.0.0.1:8020`.
+
+Corrigé : `sipv-backend` tourne maintenant sous `gunicorn` (2 workers
+`uvicorn.workers.UvicornWorker`, `--graceful-timeout 30 --timeout 30`) au
+lieu d'un `uvicorn` unique. `requirements.txt` : `gunicorn==26.1.0` ajouté.
+`/etc/systemd/system/sipv-backend.service` : `ExecStart` remplacé,
+`ExecReload=/bin/kill -s HUP $MAINPID` ajouté. Testé en direct : boucle de
+50 requêtes HTTP pendant un `systemctl reload sipv-backend`, 100% en 200,
+aucune coupure.
+
+**Nouvelle procédure pour tout déploiement de code SIPV backend** :
+`sudo systemctl reload sipv-backend` (jamais `restart`, sauf process
+bloqué/mort -- `Restart=on-failure` gère déjà ce cas automatiquement).
+
+
+**Demande Philippe (2026-08-20, verbale, log immédiat) -- mode de rappel
+explicite au timeout, pas juste un filet de sécurité.**
+
+Citation : "je ne veux pas de poste de sécurité, je veux avoir l'option de
+rappel [...] comme ça je peux sélectionner la réception et envoyer les park
+pas répondu là, ou de choisir l'option de base de rappeler le poste qui a
+parké."
+
+Comportement actuel (construit ce soir) : `return_extension` du lot n'est
+qu'un FALLBACK -- si `sip_h_Referred-By` est présent (quasi toujours en
+transfert interne), le dynamique gagne TOUJOURS, `return_extension` ne sert
+jamais en pratique. Philippe veut que ce soit un choix EXPLICITE par lot,
+pas un ordre de priorité automatique :
+
+- Mode "parker" (défaut) : comportement dynamique actuel (rappelle qui a
+  parqué, via `sip_h_Referred-By`).
+- Mode "fixed" : ignore complètement le dynamique, va TOUJOURS vers
+  `return_extension` (ex. Réception) au timeout, peu importe qui a parqué.
+
+À construire : nouveau champ `ParkingLot.timeout_return_mode` (enum
+parker/fixed, défaut parker, migration Alembic) -- `_parking_orbit_and_
+timeout_actions()` dans `xml_curl.py` ne génère la condition dynamique
+`sip_h_Referred-By` QUE si mode=parker ; en mode fixed, seul le
+`valet_parking_orbit_exten` statique est posé. ERPCRM : nouveau contrôle
+dans `ParkingLotsSection.jsx` (choix des deux modes, poste cible visible
+seulement si mode=fixed).
+
+
+**Annonce du slot en francais construite (2026-08-20, GO "fait le").**
+
+Recherche reelle (pas de supposition, demande explicite de Philippe) :
+la macro `valet_announce_ext` existe bel et bien dans FreeSWITCH
+(`lang/en/vm/sounds.xml`) -- elle epelle simplement le numero du slot
+(`say ... method="pronounced" type="name_spelled"`), aucun fichier audio
+prealable requis, aucun besoin de Voicebox pour cette partie precise
+(le backlog note plus haut ce soir, qui supposait qu'il fallait du TTS,
+etait premature -- corrige ici par la vraie lecture du source).
+
+Vraie cause du blocage : `mod_say_fr` (le module qui sait epeler des
+chiffres en francais) n'etait jamais compile ni charge sur ce serveur --
+seul `mod_say_en` existait. Source present dans l'arbre FreeSWITCH
+(`/usr/src/freeswitch-1.10.12/src/mod/say/mod_say_fr/`), Makefile deja
+genere. Compile avec `sudo make` dans ce dossier, `.so`/`.la` copies dans
+`/usr/local/freeswitch/mod/` (proprietaire/permissions alignes sur
+`mod_say_en`), charge en direct via `fs_cli -x 'load mod_say_fr'`
+(`module_exists mod_say_fr` confirme true, pas de restart FreeSWITCH
+necessaire).
+
+Macro `valet_announce_ext` ajoutee dans `lang/fr/vm/sounds.xml` (copie
+exacte de la version anglaise), plus `valet_lot_full`/`valet_lot_empty`
+(tonalites, meme bug d'absence, aucune dependance de langue). `reloadxml`
+applique.
+
+INCIDENT MINEUR pendant cette meme correction : le commentaire ajoute au
+fichier contenait `--` (meme piege que l'incident de production plus tot
+ce soir) -- cette fois repere immediatement via validation XML
+programmatique AVANT tout `reloadxml`, corrige avant impact (aucun appel
+touche).
+
+Pas encore teste sur un vrai appel avec `announce_slot=true` -- a
+confirmer avec Philippe (case "Annonce" deja dans l'ecran ERPCRM Parcage).
+
+
+**Tests réels avec Philippe (2026-08-20 soir, résultats) -- annonce et
+continuité MOH toutes les deux mises de côté, non résolues.**
+
+Annonce (`announce_slot` coché) : mod_say_fr chargé, macro
+`valet_announce_ext` ajoutée en français (voir entrée précédente) --
+testé en vrai, résultat négatif sur les deux points :
+- Aucune phrase entendue annonçant le slot (le mécanisme reste muet
+  malgré le module chargé et la macro présente -- cause non diagnostiquée
+  ce soir, pas d'investigation plus poussée faite).
+- Décoché, la MOH démarre plus vite ; coché, elle prend beaucoup plus de
+  temps à embarquer (cohérent avec le `sleep 1500ms` + tentative de
+  macro dans le chemin `play_announce` de `mod_valet_parking.c`, mais le
+  son lui-même ne sort jamais).
+
+Continuité MOH (reprise de position entre park/reprise/re-park) : le fix
+`_undef_` (session précédente) n'a pas réglé le symptôme observé -- la
+MOH recommence TOUJOURS du début à chaque nouveau park, comme avant.
+Pas re-diagnostiqué ce soir (traces de debug encore en place côté SIPV,
+`_handle_valet_hold`/`_handle_valet_exit` dans `moh_hold_tracker.py`).
+
+**Décision explicite de Philippe** : "je suis tanné de ce point, on passe
+à autre chose." Les deux points restent donc EN L'ÉTAT (annonce muette,
+MOH sans continuité pour le parcage) -- ne pas relancer de diagnostic sur
+ce sujet sans nouvelle demande explicite.

@@ -6,8 +6,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from app.core.database import get_db
+from app.core.numbering import check_internal_number_available, check_internal_range_available
 from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
-from app.models.ivr import IVR, IVROption, Queue, QueueMember, RingGroup, RingGroupMember, RingGroupFailoverStep, PagingGroup, PagingGroupMember
+from app.models.ivr import IVR, IVROption, ParkingLot, ParkingTimeoutReturnMode, Queue, QueueMember, RingGroup, RingGroupMember, RingGroupFailoverStep, PagingGroup, PagingGroupMember
 from app.models.pending_change import PendingChange
 from app.models.sip import SIPExtension
 from app.models.user import User
@@ -544,6 +545,10 @@ async def remove_failover_step(step_id: uuid.UUID, db: AsyncSession = Depends(ge
 
 @router.post("/ring-groups/tenant/{tenant_id}", response_model=RingGroupOut, status_code=status.HTTP_201_CREATED)
 async def create_ring_group(tenant_id: uuid.UUID, payload: RingGroupCreate, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
+    conflicts = await check_internal_number_available(db, tenant_id, payload.extension)
+    if conflicts:
+        c = conflicts[0]
+        raise HTTPException(status_code=400, detail=f"Numéro {payload.extension} déjà utilisé par {c.object_type} ({c.number_or_range})")
     rg = RingGroup(tenant_id=tenant_id, name=payload.name, extension=payload.extension,
                    ring_strategy=payload.ring_strategy, ring_time=payload.ring_time,
                    members=",".join(payload.members), no_answer_destination=payload.no_answer_destination,
@@ -644,6 +649,10 @@ async def list_paging_groups(tenant_id: uuid.UUID, db: AsyncSession = Depends(ge
 
 @router.post("/paging-groups/tenant/{tenant_id}", response_model=PagingGroupOut, status_code=status.HTTP_201_CREATED)
 async def create_paging_group(tenant_id: uuid.UUID, payload: PagingGroupCreate, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
+    conflicts = await check_internal_number_available(db, tenant_id, payload.extension)
+    if conflicts:
+        c = conflicts[0]
+        raise HTTPException(status_code=400, detail=f"Numéro {payload.extension} déjà utilisé par {c.object_type} ({c.number_or_range})")
     pg = PagingGroup(tenant_id=tenant_id, **payload.model_dump())
     db.add(pg)
     db.add(PendingChange(tenant_id=tenant_id, change_type="add_paging_group", entity_type="paging_group",
@@ -665,10 +674,18 @@ async def update_paging_group(pg_id: uuid.UUID, payload: PagingGroupUpdate, db: 
     pg = result.scalar_one_or_none()
     if not pg:
         raise HTTPException(status_code=404, detail="Groupe de paging introuvable")
-    for k, v in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+    if updates.get("extension") is not None:
+        conflicts = await check_internal_number_available(
+            db, pg.tenant_id, updates["extension"], exclude_object=("paging_group", str(pg_id)),
+        )
+        if conflicts:
+            c = conflicts[0]
+            raise HTTPException(status_code=400, detail=f"Numéro {updates['extension']} déjà utilisé par {c.object_type} ({c.number_or_range})")
+    for k, v in updates.items():
         setattr(pg, k, v)
     db.add(PendingChange(tenant_id=pg.tenant_id, change_type="update_paging_group", entity_type="paging_group",
-                         entity_id=str(pg_id), payload=payload.model_dump(exclude_unset=True), created_by=user.email if user else "erpcrm-proxy"))
+                         entity_id=str(pg_id), payload=updates, created_by=user.email if user else "erpcrm-proxy"))
     await db.commit()
     return _pg_out(pg)
 
@@ -731,4 +748,143 @@ async def remove_paging_group_member(member_id: uuid.UUID, db: AsyncSession = De
     db.add(PendingChange(tenant_id=pg.tenant_id, change_type="remove_paging_group_member", entity_type="paging_group",
                          entity_id=str(m.paging_group_id), payload={"member_id": str(member_id)}, created_by=user.email if user else "erpcrm-proxy"))
     await db.delete(m)
+    await db.commit()
+
+
+# ── Parking Lots (TASK-S061, item 2 -- CRUD, GO Philippe 2026-08-19) ────────────
+# Regle non-negociable (Philippe) : une mise a jour partielle doit etre validee
+# sur l'ETAT FINAL COMPLET du lot (pilote + plage), jamais sur le seul champ
+# modifie -- sinon une collision situee ailleurs dans la plage finale passerait
+# inapercue. Voir _final_parking_shape ci-dessous.
+
+class ParkingLotOut(BaseModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    name: str
+    park_extension: str
+    parking_slots_start: int
+    parking_slots_end: int
+    timeout_seconds: int
+    return_extension: str | None
+    timeout_return_mode: ParkingTimeoutReturnMode
+    announce_slot: bool
+    is_active: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ParkingLotCreate(BaseModel):
+    name: str
+    park_extension: str = "700"
+    parking_slots_start: int = 701
+    parking_slots_end: int = 720
+    timeout_seconds: int = 120
+    return_extension: str | None = None
+    timeout_return_mode: ParkingTimeoutReturnMode = ParkingTimeoutReturnMode.parker
+    announce_slot: bool = False
+    is_active: bool = True
+
+
+class ParkingLotUpdate(BaseModel):
+    name: str | None = None
+    park_extension: str | None = None
+    parking_slots_start: int | None = None
+    parking_slots_end: int | None = None
+    timeout_seconds: int | None = None
+    return_extension: str | None = None
+    timeout_return_mode: ParkingTimeoutReturnMode | None = None
+    announce_slot: bool | None = None
+    is_active: bool | None = None
+
+
+def _validate_parking_lot_shape(
+    park_extension: str, slots_start: int, slots_end: int,
+    timeout_return_mode: ParkingTimeoutReturnMode, return_extension: str | None,
+) -> None:
+    """Coherence interne d'UN lot -- independante des collisions avec les autres objets."""
+    if slots_start > slots_end:
+        raise HTTPException(status_code=400, detail=f"La plage de slots doit avoir un debut <= fin (recu {slots_start}-{slots_end})")
+    try:
+        pilot = int(park_extension)
+    except ValueError:
+        pilot = None
+    if pilot is not None and slots_start <= pilot <= slots_end:
+        raise HTTPException(status_code=400, detail=f"Le numero pilote ({park_extension}) ne peut pas etre a l'interieur de sa propre plage de slots ({slots_start}-{slots_end})")
+    # TASK-S061 (demande Philippe 2026-08-20) -- en mode "fixed", le timeout va
+    # TOUJOURS vers return_extension : sans valeur, ce serait un cul-de-sac.
+    if timeout_return_mode == ParkingTimeoutReturnMode.fixed and not return_extension:
+        raise HTTPException(status_code=400, detail="Un poste de retour est requis quand le mode de rappel est \"toujours vers un poste précis\"")
+
+
+async def _check_parking_lot_collisions(db: AsyncSession, tenant_id: uuid.UUID, park_extension: str, slots_start: int, slots_end: int, exclude_object: tuple[str, str] | None) -> None:
+    conflicts = await check_internal_number_available(db, tenant_id, park_extension, exclude_object=exclude_object)
+    if conflicts:
+        c = conflicts[0]
+        raise HTTPException(status_code=400, detail=f"Numéro pilote {park_extension} déjà utilisé par {c.object_type} ({c.number_or_range})")
+
+    conflicts = await check_internal_range_available(db, tenant_id, slots_start, slots_end, exclude_object=exclude_object)
+    if conflicts:
+        c = conflicts[0]
+        raise HTTPException(status_code=400, detail=f"Plage {slots_start}-{slots_end} en conflit avec {c.object_type} ({c.number_or_range})")
+
+
+@router.get("/parking-lots/tenant/{tenant_id}", response_model=list[ParkingLotOut])
+async def list_parking_lots(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
+    result = await db.execute(select(ParkingLot).where(ParkingLot.tenant_id == tenant_id).order_by(ParkingLot.name))
+    return result.scalars().all()
+
+
+@router.post("/parking-lots/tenant/{tenant_id}", response_model=ParkingLotOut, status_code=status.HTTP_201_CREATED)
+async def create_parking_lot(tenant_id: uuid.UUID, payload: ParkingLotCreate, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
+    _validate_parking_lot_shape(payload.park_extension, payload.parking_slots_start, payload.parking_slots_end, payload.timeout_return_mode, payload.return_extension)
+    await _check_parking_lot_collisions(db, tenant_id, payload.park_extension, payload.parking_slots_start, payload.parking_slots_end, exclude_object=None)
+
+    lot = ParkingLot(tenant_id=tenant_id, **payload.model_dump())
+    db.add(lot)
+    db.add(PendingChange(tenant_id=tenant_id, change_type="add_parking_lot", entity_type="parking_lot",
+                         entity_id=str(lot.id), payload=payload.model_dump(), created_by=user.email if user else "erpcrm-proxy"))
+    await db.commit()
+    await db.refresh(lot)
+    return lot
+
+
+@router.put("/parking-lots/{lot_id}", response_model=ParkingLotOut)
+async def update_parking_lot(lot_id: uuid.UUID, payload: ParkingLotUpdate, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
+    lot = await db.get(ParkingLot, lot_id)
+    if not lot:
+        raise HTTPException(status_code=404, detail="Lot de parcage introuvable")
+
+    updates = payload.model_dump(exclude_unset=True)
+
+    # Etat final complet = valeurs actuelles fusionnees avec le payload partiel --
+    # ne JAMAIS valider seulement le(s) champ(s) modifie(s) isolement.
+    final_park_extension = updates.get("park_extension", lot.park_extension)
+    final_slots_start = updates.get("parking_slots_start", lot.parking_slots_start)
+    final_slots_end = updates.get("parking_slots_end", lot.parking_slots_end)
+    final_timeout_return_mode = updates.get("timeout_return_mode", lot.timeout_return_mode)
+    final_return_extension = updates.get("return_extension", lot.return_extension)
+
+    _validate_parking_lot_shape(final_park_extension, final_slots_start, final_slots_end, final_timeout_return_mode, final_return_extension)
+    exclude = ("parking_lot", str(lot_id))
+    await _check_parking_lot_collisions(db, lot.tenant_id, final_park_extension, final_slots_start, final_slots_end, exclude_object=exclude)
+
+    for k, v in updates.items():
+        setattr(lot, k, v)
+    db.add(PendingChange(tenant_id=lot.tenant_id, change_type="update_parking_lot", entity_type="parking_lot",
+                         entity_id=str(lot_id), payload=updates, created_by=user.email if user else "erpcrm-proxy"))
+    await db.commit()
+    await db.refresh(lot)
+    return lot
+
+
+@router.delete("/parking-lots/{lot_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_parking_lot(lot_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User | None = Depends(get_current_user_or_service)):
+    lot = await db.get(ParkingLot, lot_id)
+    if not lot:
+        raise HTTPException(status_code=404, detail="Lot de parcage introuvable")
+    db.add(PendingChange(tenant_id=lot.tenant_id, change_type="remove_parking_lot", entity_type="parking_lot",
+                         entity_id=str(lot_id), payload={"name": lot.name}, created_by=user.email if user else "erpcrm-proxy"))
+    await db.delete(lot)
     await db.commit()

@@ -12,6 +12,7 @@ from app.core.audit import log_audit
 from app.core import erpcrm_client
 from app.core.config import settings
 from app.core.crypto import encrypt, decrypt
+from app.core.numbering import check_internal_number_available
 from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
 from app.api.v1.endpoints.sync import verify_api_key
 from app.models.sip import SIPExtension
@@ -466,6 +467,10 @@ async def create_extension(
     existing = await db.execute(select(SIPExtension).where(SIPExtension.username == username))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail=f"Extension {payload.extension} déjà existante pour ce tenant")
+    conflicts = await check_internal_number_available(db, tenant_id, payload.extension)
+    if conflicts:
+        c = conflicts[0]
+        raise HTTPException(status_code=400, detail=f"Numéro {payload.extension} déjà utilisé par {c.object_type} ({c.number_or_range})")
     password = payload.password or secrets.token_urlsafe(12)
     ext = SIPExtension(
         tenant_id=tenant_id, username=username, password=encrypt(password),

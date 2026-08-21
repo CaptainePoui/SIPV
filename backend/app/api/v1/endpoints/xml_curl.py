@@ -42,7 +42,7 @@ from app.core.esl import get_esl
 from app.models.tenant import Tenant
 from app.models.sip import SIPExtension, TenantDID
 from app.models.dialplan import InboundRoute, OutboundRoute
-from app.models.ivr import IVR, IVROption, RingGroup, PagingGroup, PagingGroupMember
+from app.models.ivr import IVR, IVROption, ParkingLot, ParkingTimeoutReturnMode, RingGroup, PagingGroup, PagingGroupMember
 from app.models.cdr import CDR
 from app.models.voicemail import VoicemailBox
 from app.models.prompt import AudioPrompt
@@ -295,11 +295,16 @@ def _user_xml(ext: "SIPExtension", tenant: "Tenant", vm_box: "VoicemailBox | Non
     # rendu). file_string:// (verifie dans le source FreeSWITCH, mod_dptools.c,
     # file_string_file_open) chaine plusieurs fichiers avec "!" en une seule
     # lecture qui repart TOUJOURS du debut a chaque playback() -- rejoue a
-    # CHAQUE Hold ET a chaque nouvel appel. silence_stream://500 = 0.5s de
-    # silence avant le debut ("ca commence trop raide").
+    # CHAQUE Hold ET a chaque nouvel appel.
     # tenant.moh_shuffle=false (Liste) -> tous les fichiers enchaines dans
     # l'ordre choisi. tenant.moh_shuffle=true (Aleatoire) -> un seul fichier
     # tire au hasard parmi la selection, choisi a nouveau a CHAQUE REGISTER.
+    #
+    # PAS de silence_stream://500 ici (retire le 2026-08-19, TASK-S033.2
+    # inversee) -- confirme par Philippe, 3x : ce delai n'a jamais eu sa place
+    # sur un vrai appel (Hold/transfert/parcage), il servait a compenser le
+    # temps de decrocher pendant une PREECOUTE (moh.py call_moh, prompts.py
+    # call_prompt) -- deplace la, voir ces fichiers.
     hold_music_var = ""
     tenant_moh_dir = MOH_SOUNDS_BASE / domain
     moh_files = sorted(tenant_moh_dir.glob("*.wav")) if tenant_moh_dir.is_dir() else []
@@ -309,7 +314,7 @@ def _user_xml(ext: "SIPExtension", tenant: "Tenant", vm_box: "VoicemailBox | Non
         else:
             chosen = moh_files
         chain = "!".join(str(f) for f in chosen)
-        hold_music_var = f'\n                <variable name="hold_music" value="file_string://silence_stream://500!{xe(chain)}"/>'
+        hold_music_var = f'\n                <variable name="hold_music" value="file_string://{xe(chain)}"/>'
     lang_var = ""
     lang_key = (tenant.phone_option_defaults or {}).get("language")
     if lang_key in _LANGUAGE_PROMPT_MAP:
@@ -595,6 +600,12 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession, r
     )
     out_routes = result.scalars().all()
 
+    # Parking lots (TASK-S061)
+    result = await db.execute(
+        select(ParkingLot).where(ParkingLot.tenant_id == tenant.id, ParkingLot.is_active == True)
+    )
+    parking_lots = result.scalars().all()
+
     ctx = xe(requested_context or f"internal-{account}")
     domain = REG_DOMAIN
     ext_entries = _ext_dialplan_entries(extensions, domain, account, ctx, caller_ext)
@@ -603,6 +614,7 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession, r
     gate_entries = await _call_permission_gate_entries(caller_ext, tenant, out_routes, account, db)
     outbound_entries = _outbound_dialplan_entries(out_routes, account, caller_ext)
     pickup_entries = await _pickup_dialplan_entries(caller_ext, extensions)
+    parking_entries = _parking_dialplan_entries(parking_lots, tenant.id, account)
 
     xml = f"""{XML_HDR}
 <document type="freeswitch/xml">
@@ -631,6 +643,7 @@ async def _dialplan_internal(account: str, destination: str, db: AsyncSession, r
 {ext_entries}
 {rg_entries}
 {paging_entries}
+{parking_entries}
 {gate_entries}
 {outbound_entries}
 
@@ -936,7 +949,7 @@ async def _ringgroup_dialplan_entries(ring_groups: list, domain: str, extensions
         if rg.schedule_id and not await _is_schedule_open(rg.schedule_id, db):
             fallback = rg.no_answer_destination
             if fallback:
-                entries.append(f"""      <!-- Ring group {rg.extension}: {xe(rg.name)} (ferme -- horaire) -->
+                entries.append(f"""      <!-- Ring group {rg.extension}: {xe(rg.name)} (ferme, hors horaire) -->
       <extension name="{name}">
         <condition field="destination_number" expression="^{num}$">
           <action application="transfer" data="{xe(fallback)} XML {ctx}"/>
@@ -1012,6 +1025,130 @@ async def _ringgroup_dialplan_entries(ring_groups: list, domain: str, extensions
           <action application="set" data="ringback=${{us-ring}}"/>
           <action application="bridge" data="{xe(bridge_str)}"/>{failover_actions}
           <action application="hangup" data="NORMAL_CLEARING"/>
+        </condition>
+      </extension>""")
+    return "\n\n".join(entries)
+
+
+def _parking_lot_technical_key(tenant_id, lot_id) -> str:
+    """
+    Cle technique FreeSWITCH pour un ParkingLot (TASK-S061, item 3). mod_valet_parking
+    indexe ses lots dans UNE SEULE table de hachage globale au processus (confirme
+    dans mod_valet_parking.c : globals.hash, valet_find_lot(), valet_info -- aucun
+    qualificatif de contexte/tenant nulle part) -- deux tenants utilisant le meme nom
+    de lot pointeraient litteralement vers le meme objet en memoire. Cle derivee des
+    UUID (tenant_id + parking_lot.id), jamais de ParkingLot.name (modifiable par
+    l'utilisateur -- un renommage ne doit jamais changer la cle d'un appel deja
+    stationne). Verifie dans le source : lot->name = strdup(name), aucune restriction
+    de longueur/caracteres -- un UUID avec tirets est accepte tel quel, pas besoin
+    d'encodage alternatif.
+    """
+    return f"tenant_{tenant_id}_parking_{lot_id}"
+
+
+def _int_range_regex(start: int, end: int) -> str:
+    """
+    Regex qui matche EXACTEMENT les entiers de start a end inclusivement, sous
+    forme d'alternation numerotee -- pas un algorithme de decoupage par chiffre
+    (inutile ici : les plages de parcage restent petites, ScopServ va jusqu'a
+    701-799 soit 99 numeros au maximum observe). Simple, evident a l'oeil,
+    facile a tester -- pas la peine d'un algorithme plus complexe pour ce volume.
+    """
+    return "(" + "|".join(str(n) for n in range(start, end + 1)) + ")"
+
+
+def _parking_orbit_and_timeout_actions(lot, account: str) -> str:
+    """
+    TASK-S061, item 6 -- timeout + retour dynamique au poste qui a parke.
+    Confirme sur un vrai appel le 2026-08-20 (pas suppose) : sip_h_Referred-By
+    porte l'identite du poste qui a fait le transfert (ex.
+    <sip:t1001-102@192.168.1.55:5061>), pose par mod_sofia sur le canal cible
+    AVANT l'execution de valet_park -- verifie via uuid_getvar en direct.
+    sip_referred_by_user_stripped (pre-parse par mod_sofia) NE se peuple PAS
+    dans ce chemin de code (transfert interne via REFER) -- verifie aussi en
+    direct, d'ou l'extraction manuelle par regex ci-dessous plutot que cette
+    variable.
+
+    Comportement voulu (Philippe, 2026-08-20, comportement de reference UCM/
+    ScopServ) : au timeout, l'appel retourne au poste qui a fait le park --
+    return_extension du lot sert de repli seulement si Referred-By est absent
+    (ex. appel arrive au pilote sans passer par un vrai REFER). Le statique
+    est pose EN PREMIER, le dynamique le remplace ($1) si le motif matche --
+    l'ordre des <action> determine qui gagne, pas une vraie condition
+    if/else (FreeSWITCH dialplan n'en a pas).
+
+    Raffinement (Philippe, 2026-08-20, meme soiree) : ce comportement
+    dynamique n'est plus impose sans condition -- `timeout_return_mode` du
+    lot rend le choix EXPLICITE, pas juste un fallback automatique. Citation :
+    "je ne veux pas de poste de securite, je veux avoir l'option de rappel
+    [...] comme ca je peux selectionner la reception [...] ou de choisir
+    l'option de base de rappeler le poste qui a parke." Mode "fixed" : le
+    dynamique n'est meme pas genere -- toujours return_extension, peu importe
+    qui a parque. Mode "parker" (defaut) : comportement dynamique ci-dessus,
+    inchange.
+    """
+    static_orbit = ""
+    if lot.return_extension:
+        static_orbit = f'          <action application="set" data="valet_parking_orbit_exten={xe(lot.return_extension)}"/>\n'
+
+    if lot.timeout_return_mode == ParkingTimeoutReturnMode.fixed:
+        return f"""{static_orbit}          <action application="set" data="valet_parking_timeout={lot.timeout_seconds}"/>"""
+
+    referred_by_regex = xe(f"sip:{account}-([^@]+)@")
+
+    return f"""{static_orbit}          <condition field="${{sip_h_Referred-By}}" expression="{referred_by_regex}" break="never">
+            <action application="set" data="valet_parking_orbit_exten=$1"/>
+          </condition>
+          <action application="set" data="valet_parking_timeout={lot.timeout_seconds}"/>"""
+
+
+def _parking_dialplan_entries(parking_lots: list, tenant_id, account: str) -> str:
+    """
+    TASK-S061, items 3+4+6 -- pilote (700 -> valet_park ... auto in start end,
+    assignation automatique) ET plage de reprise/parcage direct (701-7xx ->
+    valet_park ... $1, UNE seule regle dialplan pour toute la plage, pas une
+    extension XML par slot) ET timeout/retour dynamique (item 6, voir
+    _parking_orbit_and_timeout_actions).
+
+    Comportement confirme avec Philippe (2026-08-19, comportement reel de
+    l'UCM avec les 2 modes actifs simultanement) : transferer au pilote choisit
+    automatiquement le premier slot libre (701, sinon 702, ...) ; transferer ou
+    composer directement un slot (ex. 703) l'utilise CE slot precisement --
+    parke l'appel courant s'il est libre, reprend l'appel stationne s'il est
+    occupe. C'est exactement le comportement natif de `valet_park <lot> <ext>`
+    (verifie dans mod_valet_parking.c) -- aucune logique de type
+    "retrieve only" a fabriquer, le module fait deja ca nativement.
+
+    PAS encore dans cette etape : valet_info (item 7), BLF (item 8),
+    provisioning (item 9), ERPCRM (items 10-11).
+
+    ATTENTION XML (incident 2026-08-20) : ne JAMAIS mettre -- dans un
+    commentaire XML genere ici -- ca casse le parsing complet du dialplan
+    pour tout le tenant. Valider le XML genere programmatiquement apres
+    tout changement a cette fonction.
+    """
+    entries = []
+    for lot in parking_lots:
+        key = xe(_parking_lot_technical_key(tenant_id, lot.id))
+        pilot = xe(lot.park_extension)
+        pilot_name = xe(f"parking_{lot.park_extension}")
+        orbit_timeout = _parking_orbit_and_timeout_actions(lot, account)
+        entries.append(f"""      <!-- Parking lot {lot.park_extension}: {xe(lot.name)} -->
+      <extension name="{pilot_name}">
+        <condition field="destination_number" expression="^{pilot}$">
+{orbit_timeout}
+          <action application="set" data="valet_announce_slot={xe('true' if lot.announce_slot else 'false')}"/>
+          <action application="valet_park" data="{key} auto in {lot.parking_slots_start} {lot.parking_slots_end}"/>
+        </condition>
+      </extension>""")
+
+        slots_name = xe(f"parking_slots_{lot.parking_slots_start}_{lot.parking_slots_end}")
+        slots_regex = xe(f"^{_int_range_regex(lot.parking_slots_start, lot.parking_slots_end)}$")
+        entries.append(f"""      <!-- Parking lot {lot.park_extension} slots: {lot.parking_slots_start}-{lot.parking_slots_end} -->
+      <extension name="{slots_name}">
+        <condition field="destination_number" expression="{slots_regex}">
+{orbit_timeout}
+          <action application="valet_park" data="{key} $1"/>
         </condition>
       </extension>""")
     return "\n\n".join(entries)

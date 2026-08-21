@@ -1,9 +1,20 @@
+import enum
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Boolean, DateTime, Text, Integer, ForeignKey, Numeric
+from sqlalchemy import String, Boolean, DateTime, Text, Integer, ForeignKey, Numeric, Enum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
+
+
+class ParkingTimeoutReturnMode(str, enum.Enum):
+    """
+    TASK-S061 -- au timeout d'un parcage, qui rappeler. Demande explicite de
+    Philippe (2026-08-20) : un vrai choix par lot, pas juste un fallback
+    automatique quand le dynamique echoue.
+    """
+    parker = "parker"  # comportement dynamique (sip_h_Referred-By) -- defaut
+    fixed = "fixed"    # toujours return_extension, ignore le dynamique
 
 
 class IVR(Base):
@@ -178,6 +189,19 @@ class ParkingLot(Base):
     parking_slots_end: Mapped[int] = mapped_column(Integer, default=720)
     timeout_seconds: Mapped[int] = mapped_column(Integer, default=120)
     return_extension: Mapped[str | None] = mapped_column(String(20))
+    timeout_return_mode: Mapped[ParkingTimeoutReturnMode] = mapped_column(
+        Enum(ParkingTimeoutReturnMode, name="parking_timeout_return_mode_enum"),
+        default=ParkingTimeoutReturnMode.parker,
+        server_default=ParkingTimeoutReturnMode.parker.value,
+        nullable=False,
+    )
+    # valet_announce_slot (TASK-S061) -- annonce vocale du slot choisi en mode
+    # auto. False par defaut : mod_valet_parking annonce par defaut (play_announce=1
+    # cote module), mais Philippe l'a explicitement desactive pour son usage actuel
+    # (blind transfer uniquement, 2026-08-19) -- pas encore de distinction
+    # blind/attended cablee (signal confirme pour plus tard : sip_replaces_call_id).
+    announce_slot: Mapped[bool] = mapped_column(Boolean, default=False, server_default='false')
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default='true')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 

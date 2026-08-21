@@ -3,6 +3,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://sipv:sipv_change_me@localhost:5432/sipv"
+    TEST_DATABASE_URL: str = "postgresql+asyncpg://sipv:sipv_change_me@localhost:5432/sipv_test"  # DB dediee aux tests automatises, JAMAIS la DB de dev/prod (garde-fou dans tests/conftest.py)
     SECRET_KEY: str = "change_me_to_a_very_long_random_string"
     ENVIRONMENT: str = "development"
     # Network — change these when migrating servers

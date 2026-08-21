@@ -195,7 +195,10 @@ async def call_moh(
 
     endpoint = f"user/{ext.username}@sipv"
     esl: ESLClient = await get_esl()
-    await esl.originate_app(endpoint, "playback", str(dest))
+    # silence_stream://500 (2026-08-19, deplace depuis xml_curl.py/hold_music --
+    # ici, en preecoute, ca compense le temps de decrocher avant que ca commence
+    # a jouer ; sur un vrai appel ce delai n'a pas sa place, voir TASKSIPV.md)
+    await esl.originate_app(endpoint, "playback", f"file_string://silence_stream://500!{dest}")
     return {"ok": True}
 
 
