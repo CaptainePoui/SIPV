@@ -36,3 +36,6 @@ backend/uploads/
 *.log
 logs/*
 frontend/.env
+
+# Serena MCP (outillage dev local)
+.serena/
