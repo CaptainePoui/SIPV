@@ -74,6 +74,7 @@ api/v1/endpoints/
 - Implémenter SEULEMENT ce qui est demandé
 - Jamais d'IPs codées en dur
 - Ne pas modifier un module existant sans demande explicite
+- Graphiti EN PREMIER pour TOUTE demande, sans exception (nouvelle fonctionnalite, bug, decision d approche, nouveau TASK-SXXX, question, correction mineure) -- voir skill graphiti-knowledge. Lecture disponible ; ecriture depuis SIPV PAS ENCORE construite (backlog, voir skill pour le detail)
 
 ## Convention TASKSIPV.md
 - TASK-SXXX = création initiale d'un module SIPV
