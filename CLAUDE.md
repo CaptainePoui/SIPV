@@ -69,14 +69,14 @@ api/v1/endpoints/
 
 ## Règles absolues
 - GO obligatoire avant tout code
-- Lire `TASKSIPV.md` EN PREMIER avant toute intervention
+- Lire `PLATFORM_TASKS.md` (depot ERPCRM, docs/platform/PLATFORM_TASKS.md, section SIPV) EN PREMIER avant toute intervention -- source active depuis la migration Phase O (2026-08-21/22). `TASKSIPV.md` reste une archive historique, plus aucune nouvelle entree n'y est ajoutee. Fichier sur un depot distinct : le lire via SSH vers ERPCRM si la session n'y a pas deja acces
 - Zéro supposition — demander si incertain
 - Implémenter SEULEMENT ce qui est demandé
 - Jamais d'IPs codées en dur
 - Ne pas modifier un module existant sans demande explicite
 - Graphiti EN PREMIER pour TOUTE demande, sans exception (nouvelle fonctionnalite, bug, decision d approche, nouveau TASK-SXXX, question, correction mineure) -- voir skill graphiti-knowledge. Lecture disponible ; ecriture depuis SIPV PAS ENCORE construite (backlog, voir skill pour le detail)
 
-## Convention TASKSIPV.md
+## Convention PLATFORM_TASKS.md (depot ERPCRM, section SIPV)
 - TASK-SXXX = création initiale d'un module SIPV
 - TASK-SXXX.Y = ajout ou fix sur ce module
-- Chercher le module dans TASKSIPV.md avant d'écrire une nouvelle entrée
+- Chercher le module dans PLATFORM_TASKS.md (section SIPV) avant d'écrire une nouvelle entrée -- jamais dans TASKSIPV.md (archive)

@@ -22,9 +22,14 @@ Cas d'usage typiques (liste illustrative, pas limitative) :
 
 Pas pour "que fait le code aujourd'hui" (Serena) ni "qu'est-ce qu'il reste a faire" (PLATFORM_TASKS.md, section SIPV -- vit sur le depot ERPCRM, un seul fichier pour toute la plateforme).
 
-## Quand alimenter Graphiti -- ECRITURE PAS ENCORE CONSTRUITE DEPUIS SIPV (2026-09-10)
+## Quand alimenter Graphiti -- ECRITURE CONSTRUITE (2026-09-10, TASK-S062)
 
-Contrairement a ERPCRM (qui ecrit directement via `fast_write.py` dans le conteneur), **SIPV n'a aujourd'hui aucun mecanisme pour ecrire de nouveaux faits dans Graphiti** -- ni script, ni cron. Le mecanisme prevu (voir `tools/knowledge/graphiti/scripts/graphiti_queue_consumer.py` cote ERPCRM, section "incoming/*.jsonl -- pousses par SIPV/DashV16 via scp depuis leur propre cron") n'a jamais ete construit cote SIPV. Backlog ouvert -- voir PLATFORM_TASKS.md (section SIPV) pour le numero de tache une fois cree. Ne PAS improviser une ecriture directe vers le conteneur ERPCRM depuis une session SIPV (violerait l'autonomie SIPV -- voir memoire persistante `feedback_sipv_must_stay_autonomous`) : tant que ce mecanisme n'existe pas, signaler a Philippe qu'un fait merite d'etre ajoute plutot que d'ecrire directement.
+SIPV ecrit maintenant dans Graphiti via une file locale, pas directement dans le conteneur (qui vit sur ERPCRM) :
+1. `python3 scripts/graphiti_queue_fact.py <<< '{"type": "triplet", "source": "NomExact", "edge_name": "RELATES_TO", "fact": "...(le pourquoi, reference TASK-SXXX)...", "target": "NomExact"}'` -- ajoute a `scripts/graphiti_queue.jsonl` (local, jamais commite).
+2. Cron `scripts/push_graphiti_queue.py` (a la minute) pousse ce fichier par scp vers `erpcrm:/home/simpleip/erpcrm/tools/knowledge/graphiti/incoming/sipv.jsonl` (alias SSH `erpcrm`, cle dediee `id_ed25519_erpcrm` -- non restreinte, voir memoire persistante pour le choix).
+3. Le consommateur de file cote ERPCRM (`graphiti_queue_consumer.py`) traite la nouvelle ligne via `add_triplet` (graphiti-core, PAS le chemin rapide `fast_write.py`) -- **LENT** : ~7-8 min par fait sur ce materiel CPU-seul (meme limite que TASK-040.9), parce que ce chemin fait une resolution/dedup par LLM. Teste et confirme fonctionnel de bout en bout le 2026-09-10.
+
+Meme discipline que cote ERPCRM avant d'ecrire : verifier que le concept/la relation n'existe pas deja (demander a Claude cote ERPCRM ou chercher dans une session qui a acces a Graphiti) -- ce script n'a aucune verification integree, il fait confiance a l'appelant.
 
 ## Hierarchie en cas de contradiction
 
