@@ -106,13 +106,25 @@ class ESLClient:
     # ── Commands ───────────────────────────────────────────────────────────────
 
     async def _send(self, command: str) -> tuple[dict, str]:
-        """Send a raw ESL command and return the reply packet."""
+        """Send a raw ESL command and return the reply packet.
+
+        Si la connexion TCP est morte silencieusement (FreeSWITCH redemarre,
+        coupure reseau -- pas de FIN/RST propre recu), _connected restait a
+        tort True indefiniment : get_esl() ne reconnectait donc plus jamais
+        (il ne verifie que is_connected), et CHAQUE appel suivant echouait de
+        la meme facon jusqu'a un redemarrage complet du service. Corrige :
+        toute exception ici marque explicitement la connexion comme perdue,
+        pour que le PROCHAIN get_esl() se reconnecte automatiquement."""
         async with self._lock:
             if not self._connected:
                 raise RuntimeError("ESL not connected")
-            self._writer.write(f"{command}\n\n".encode())
-            await self._writer.drain()
-            return await self._read_packet()
+            try:
+                self._writer.write(f"{command}\n\n".encode())
+                await self._writer.drain()
+                return await self._read_packet()
+            except Exception:
+                self._connected = False
+                raise
 
     async def api(self, command: str) -> str:
         """
