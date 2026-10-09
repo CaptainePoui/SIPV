@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     # lignes (+ SIPV_HOST/SIPV_PUBLIC_IP ci-dessous).
     APP_DIR: str = "/home/sipv/sipv"
     FREESWITCH_DIR: str = "/usr/local/freeswitch"
+    # Copies audio jouees par « Appeler » (phrase, musique d attente -- TASK-S055.8) : dossier
+    # du service SIPV, lisible par FreeSWITCH. Hors de FREESWITCH_DIR/conf, qui appartient a
+    # freeswitch (permission refusee depuis le 2026-08-12) ; hors de APP_DIR, que FreeSWITCH ne peut
+    # pas lire (/home/sipv en 750). Demenager ce serveur = aussi creer ce dossier (sipv:sipv 755).
+    CALL_CACHE_DIR: str = "/var/lib/sipv/call_cache"
     SIPV_PUBLIC_IP: str = "142.112.42.52"  # IP publique -- utilisee comme outbound proxy pour les postes (fonctionne local + distant via hairpin NAT)
     ERPCRM_HOST: str = "192.168.1.9"
     ERPCRM_API_URL: str = "https://192.168.1.9:8011"

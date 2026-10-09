@@ -25,11 +25,11 @@ router = APIRouter()
 # copie locale sur ERPCRM, voir TASKSIPV.md TASK-S018.3).
 UPLOAD_DIR = Path(settings.APP_DIR) / "backend/uploads/audio_prompts"
 
-# TASK-S055/TASK-029.2 : cache lisible par le process freeswitch (conf/ appartient
-# a freeswitch:freeswitch, sipv ne peut pas y creer d'entree -- dossier cree
-# manuellement une fois : sudo mkdir + chown sipv:sipv + chmod 755, PAS persistant
-# via code/migration, voir TASKSIPV.md TASK-029.7).
-PROMPT_CACHE_DIR = Path(settings.FREESWITCH_DIR) / "conf/prompts_cache"
+# TASK-S055/TASK-029.2 : cache lisible par le process freeswitch (/home/sipv est en 750).
+# TASK-S055.8 (2026-10-09) : l ancien dossier sous FREESWITCH_DIR/conf, cree a la main
+# en sipv:sipv, est repasse a freeswitch le 2026-08-12 (permission refusee, Appeler en
+# panne) -- deplace dans settings.CALL_CACHE_DIR, hors des dossiers de FreeSWITCH.
+PROMPT_CACHE_DIR = Path(settings.CALL_CACHE_DIR) / "prompts"  # TASK-S055.8
 
 
 class AudioPromptOut(BaseModel):

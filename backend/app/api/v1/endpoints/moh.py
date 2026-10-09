@@ -27,9 +27,10 @@ UPLOAD_DIR = Path(settings.APP_DIR) / "backend/uploads/moh_files"
 # freeswitch (autre utilisateur) ne peut pas y traverser -- confirme en direct
 # (playback() echouait avec "Permission denied" sur un fichier pourtant
 # lisible individuellement, la traversee du dossier parent bloquait tout).
-# Dossier cree manuellement une fois : sudo mkdir + chown sipv:sipv + chmod 755,
-# PAS persistant via code/migration.
-MOH_CALL_CACHE_DIR = Path(settings.FREESWITCH_DIR) / "conf/moh_call_cache"
+# TASK-S055.8 (2026-10-09) : l ancien dossier sous FREESWITCH_DIR/conf, cree a la main
+# en sipv:sipv, est repasse a freeswitch le 2026-08-12 (permission refusee, Appeler en
+# panne) -- deplace dans settings.CALL_CACHE_DIR, hors des dossiers de FreeSWITCH.
+MOH_CALL_CACHE_DIR = Path(settings.CALL_CACHE_DIR) / "moh"  # TASK-S055.8
 
 
 class MohFileOut(BaseModel):
