@@ -8,7 +8,7 @@ from app.core.moh_hold_tracker import hold_tracker_startup, hold_tracker_shutdow
 from app.services.backup_poller import run_backup_poller
 from app.services.cdr_retention_poller import run_cdr_retention_poller
 import app.models
-from app.api.v1.endpoints import auth, tenants, extensions, commit, sync, trunks, dids, routes, ivr, voicemail, cdr, e911, provisioning, recordings, fax, sms, security, webhooks, schedules, esl, xml_curl, audit, servers, prompts, moh, backup
+from app.api.v1.endpoints import auth, tenants, extensions, commit, sync, trunks, dids, routes, ivr, voicemail, cdr, e911, provisioning, recordings, fax, sms, security, webhooks, schedules, esl, xml_curl, audit, servers, prompts, moh, backup, migration
 
 
 @asynccontextmanager
@@ -74,6 +74,7 @@ app.include_router(servers.router, prefix="/api/v1/servers", tags=["servers"])
 app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["prompts"])
 app.include_router(moh.router, prefix="/api/v1/moh", tags=["moh"])
 app.include_router(backup.router, prefix="/api/v1/backup", tags=["backup"])
+app.include_router(migration.router, prefix="/api/v1/migration", tags=["migration"])  # TASK-051 (ERPCRM)
 
 
 @app.get("/api/health")

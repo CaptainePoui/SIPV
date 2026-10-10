@@ -44,6 +44,9 @@ class CDR(Base):
     direction: Mapped[str | None] = mapped_column(String(10))    # inbound / outbound
     prefix_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("rate_prefixes.id", ondelete="SET NULL"))
     cost: Mapped[Decimal | None] = mapped_column(Numeric(10, 6))
+    # TASK-051 : poste ou numero migre vers un autre tenant -- l historique reste ici, marque
+    migrated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    migrated_to_tenant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="SET NULL"))
     rate_per_minute: Mapped[Decimal | None] = mapped_column(Numeric(10, 6))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
