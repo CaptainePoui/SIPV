@@ -22,5 +22,7 @@ async def reboot_phones(username: str) -> int:
     esl = await get_esl()
     realms = await registered_realms(username)
     for realm in realms:
-        await esl.api(f"sofia profile internal flush_inbound_reg {username}@{realm} reboot")
+        # check_sync : envoie le NOTIFY sans toucher a l enregistrement. (flush_inbound_reg … reboot l effacait aussi :
+        # si le telephone refusait l ordre, le serveur le croyait deconnecte jusqu a son prochain renouvellement.)
+        await esl.api(f"sofia profile internal check_sync {username}@{realm}")
     return len(realms)
