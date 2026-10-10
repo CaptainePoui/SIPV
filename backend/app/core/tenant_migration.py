@@ -548,7 +548,8 @@ async def execute(db: AsyncSession, sel: dict) -> dict:
     await db.commit()
     return {"ok": True, "backup": backup, "steps": p["steps"], "warnings": p["warnings"], "cdr_marked": cdr_marked,
             "moved_extensions": [{"id": str(eid), "old_username": old_users[eid], "username": c["new_user"][eid],
-                                  "old_number": old_nums[eid], "number": c["new_num"][eid], "name": exts[eid].name}
+                                  "old_number": old_nums[eid], "number": c["new_num"][eid], "name": exts[eid].name,
+                                  "erpcrm_contact_id": str(exts[eid].erpcrm_contact_id) if exts[eid].erpcrm_contact_id else None}
                                  for eid in exts],
             "moved_dids": [{"id": str(i), "number": d.number, "erpcrm_did_id": str(d.erpcrm_did_id) if d.erpcrm_did_id else None}
                            for i, d in dids.items()],
