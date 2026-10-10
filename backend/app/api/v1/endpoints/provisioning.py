@@ -408,6 +408,21 @@ async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_d
     return rendered
 
 
+@router.get("/gs/cfg{mac_hex}", response_class=PlainTextResponse)
+async def grandstream_config(mac_hex: str, db: AsyncSession = Depends(get_db)):
+    """Adresse standard Grandstream (TASK-051 cote ERPCRM, 2026-10-10) : un telephone dont le serveur de configuration
+    est seulement l adresse du serveur demande « /cfg<mac> » a la racine (le serveur web y renvoie ici). Repond la
+    configuration du telephone directement (sans redirection)."""
+    hexa = mac_hex.lower().removesuffix(".xml")
+    if len(hexa) != 12 or any(c not in "0123456789abcdef" for c in hexa):
+        raise HTTPException(status_code=404, detail="MAC invalide")
+    mac = ":".join(hexa[i:i + 2] for i in range(0, 12, 2)).upper()
+    phone = (await db.execute(select(ProvisionedPhone).where(ProvisionedPhone.mac_address == mac))).scalar_one_or_none()
+    if not phone:
+        raise HTTPException(status_code=404, detail="MAC non enregistrée")
+    return await get_phone_config(phone.id, db)
+
+
 @router.get("/mac/{mac_address}/config", response_class=PlainTextResponse)
 async def get_phone_config_by_mac(mac_address: str, db: AsyncSession = Depends(get_db)):
     """Provisioning URL by MAC (phones POST their MAC on boot)."""

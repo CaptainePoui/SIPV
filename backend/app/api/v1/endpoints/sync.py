@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.core.did_route_sync import sync_inbound_route_from_did
 from app.core import erpcrm_client
 from app.models.tenant import Tenant
+from app.models.server import SipvServer
 from app.models.sip import SIPExtension, TenantDID
 from app.models.e911 import E911Address
 
@@ -51,12 +52,16 @@ async def sync_company(payload: ERPCRMCompanySync, db: AsyncSession = Depends(ge
 
     if not tenant:
         context_prefix = f"t-{payload.account_number.lower().replace(' ', '_').replace('-', '_')}"
+        # Serveur du tenant (TASK-S042) : tant qu il n y en a qu un seul actif, le nouveau tenant y est rattache --
+        # sans lui, la configuration des telephones sort sans adresse SIP (constate sur T1000, 2026-10-10)
+        servers = (await db.execute(select(SipvServer.id).where(SipvServer.is_active == True))).scalars().all()
         tenant = Tenant(
             account_number=payload.account_number,
             company_name=payload.company_name,
             erpcrm_company_id=payload.erpcrm_company_id,
             is_active=payload.is_active,
             context_prefix=context_prefix,
+            server_id=servers[0] if len(servers) == 1 else None,
         )
         db.add(tenant)
         await db.commit()
