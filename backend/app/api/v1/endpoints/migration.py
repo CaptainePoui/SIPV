@@ -78,8 +78,16 @@ async def execute(sel: Selection, request: Request, db: AsyncSession = Depends(g
     try:
         esl = await get_esl()
         await esl.reload_xml()
+        # Le domaine d enregistrement n est pas toujours le compte (ex. « sipv ») : on prend celui de chaque enregistrement reel
+        regs = await esl.api("sofia status profile internal reg")
         for e in res["moved_extensions"]:
-            await esl.api(f"sofia profile internal flush_inbound_reg {e['old_username']}@{src['account_number']} reboot")
+            old = e["old_username"]
+            realms = {line.split("@", 1)[1].strip() for line in regs.splitlines()
+                      if line.strip().startswith("User:") and line.split()[-1].split("@")[0] == old}
+            if not realms:
+                after.append(f"Poste {e['number']} : aucun téléphone enregistré sous {old} — configurez {e['username']} sur l appareil.")
+            for realm in realms:
+                await esl.api(f"sofia profile internal flush_inbound_reg {old}@{realm} reboot")
     except Exception as ex:
         after.append(f"FreeSWITCH : rechargement ou redémarrage des téléphones à faire à la main ({ex}).")
     try:
