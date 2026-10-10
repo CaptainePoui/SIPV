@@ -809,3 +809,20 @@ async def delete_pickup_group(group_id: uuid.UUID, db: AsyncSession = Depends(ge
         ext.pickup_group = None
     await db.delete(g)
     await db.commit()
+
+
+@router.post("/{ext_id}/reboot")
+async def reboot_extension_phones(ext_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    """Bouton « Redemarrer » d ERPCRM (2026-10-10) : redemarre a distance les telephones enregistres sous ce poste."""
+    ext = await db.get(SIPExtension, ext_id)
+    if not ext:
+        raise HTTPException(status_code=404, detail="Poste introuvable")
+    from app.core.phone_reboot import reboot_phones
+    try:
+        n = await reboot_phones(ext.username)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"FreeSWITCH injoignable : {e}")
+    if not n:
+        raise HTTPException(status_code=409, detail=f"Aucun téléphone enregistré sous {ext.username}")
+    return {"rebooted": n, "username": ext.username}
+
