@@ -12,6 +12,7 @@ from app.core.database import get_db
 from app.core.esl import get_esl
 from app.models.audit_log import AuditLog
 from app.models.user import User
+from app.models.sip import SIPExtension
 
 router = APIRouter()
 log = logging.getLogger("migration")
@@ -80,7 +81,9 @@ async def execute(sel: Selection, request: Request, db: AsyncSession = Depends(g
         await esl.reload_xml()
         from app.core.phone_reboot import reboot_phones
         for e in res["moved_extensions"]:
-            if not await reboot_phones(e["old_username"]):
+            moved = await db.get(SIPExtension, uuid.UUID(e["id"]))
+            from app.core.crypto import decrypt
+            if not await reboot_phones(e["old_username"], decrypt(moved.password) if moved else None):
                 after.append(f"Poste {e['number']} : aucun téléphone enregistré sous {e['old_username']} — configurez {e['username']} sur l appareil.")
     except Exception as ex:
         after.append(f"FreeSWITCH : rechargement ou redémarrage des téléphones à faire à la main ({ex}).")

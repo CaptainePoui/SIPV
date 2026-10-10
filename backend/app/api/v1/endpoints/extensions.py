@@ -819,7 +819,8 @@ async def reboot_extension_phones(ext_id: uuid.UUID, db: AsyncSession = Depends(
         raise HTTPException(status_code=404, detail="Poste introuvable")
     from app.core.phone_reboot import reboot_phones
     try:
-        n = await reboot_phones(ext.username)
+        from app.core.crypto import decrypt
+        n = await reboot_phones(ext.username, decrypt(ext.password))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"FreeSWITCH injoignable : {e}")
     if not n:

@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     # local_stream.conf.xml de FreeSWITCH inclut MOH_INCLUDE_DIR/*.xml (chemin absolu).
     MOH_STREAM_DIR: str = "/var/lib/sipv/moh_streams"
     MOH_INCLUDE_DIR: str = "/var/lib/sipv/local_stream"
+    # Cle de la demande interne SIPV -> Kamailio « redemarrer un telephone » (NOTIFY check-sync authentifie, 2026-10-10)
+    KAMAILIO_CTRL_KEY: str = ""
     SIPV_PUBLIC_IP: str = "142.112.42.52"  # IP publique -- utilisee comme outbound proxy pour les postes (fonctionne local + distant via hairpin NAT)
     ERPCRM_HOST: str = "192.168.1.9"
     ERPCRM_API_URL: str = "https://192.168.1.9:8011"
