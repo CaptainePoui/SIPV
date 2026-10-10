@@ -392,6 +392,7 @@ async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_d
         "buttons": sorted(phone.buttons, key=lambda b: (b.page, b.position)),
         "button_mode": BUTTON_TYPE_TO_GS_MODE,
         "config_host": f"{settings.SIPV_HOST}:8020",
+        "provision_host": settings.SIPV_HOST,   # P237 : le telephone demande /cfg<mac> au serveur web (0068)
     }
 
     try:
