@@ -25,8 +25,8 @@ from app.models.moh import MohFile, TenantMohSelection
 
 logger = logging.getLogger("local_stream")
 
-LOCAL_STREAM_INCLUDE_DIR = Path(settings.FREESWITCH_DIR) / "conf/local_stream"
-MOH_SOUNDS_BASE = Path(settings.FREESWITCH_DIR) / "sounds/sipv_moh"
+LOCAL_STREAM_INCLUDE_DIR = Path(settings.MOH_INCLUDE_DIR)   # hors de FREESWITCH_DIR (voir config.py)
+MOH_SOUNDS_BASE = Path(settings.MOH_STREAM_DIR)
 MOH_UPLOAD_DIR = Path(settings.APP_DIR) / "backend/uploads/moh_files"
 
 

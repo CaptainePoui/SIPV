@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     # freeswitch (permission refusee depuis le 2026-08-12) ; hors de APP_DIR, que FreeSWITCH ne peut
     # pas lire (/home/sipv en 750). Demenager ce serveur = aussi creer ce dossier (sipv:sipv 755).
     CALL_CACHE_DIR: str = "/var/lib/sipv/call_cache"
+    # Musique d attente par tenant (TASK-S033 ; deplace le 2026-10-10, TASK-051 cote ERPCRM) : fichiers du flux et fragment
+    # XML local_stream ecrits par SIPV. Hors de FREESWITCH_DIR : le service freeswitch fait « chown -R freeswitch
+    # /usr/local/freeswitch » a CHAQUE demarrage (ExecStartPre), ce qui rendait ces dossiers non inscriptibles pour SIPV.
+    # local_stream.conf.xml de FreeSWITCH inclut MOH_INCLUDE_DIR/*.xml (chemin absolu).
+    MOH_STREAM_DIR: str = "/var/lib/sipv/moh_streams"
+    MOH_INCLUDE_DIR: str = "/var/lib/sipv/local_stream"
     SIPV_PUBLIC_IP: str = "142.112.42.52"  # IP publique -- utilisee comme outbound proxy pour les postes (fonctionne local + distant via hairpin NAT)
     ERPCRM_HOST: str = "192.168.1.9"
     ERPCRM_API_URL: str = "https://192.168.1.9:8011"

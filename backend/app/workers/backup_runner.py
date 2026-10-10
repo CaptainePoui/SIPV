@@ -46,7 +46,8 @@ CONFIG_PATHS = [
     (Path("/etc/systemd/system/sipv-backend-tls.service"), "config/systemd/sipv-backend-tls.service"),
     (Path("/etc/kamailio/kamailio.cfg"), "config/kamailio.cfg"),
     (Path("/etc/freeswitch/vars.xml"), "config/freeswitch/vars.xml"),
-    (Path(settings.FREESWITCH_DIR) / "conf/local_stream", "config/freeswitch/local_stream"),
+    (Path(settings.MOH_INCLUDE_DIR), "config/freeswitch/local_stream"),
+    (Path("/usr/local/freeswitch/conf/autoload_configs/local_stream.conf.xml"), "config/freeswitch/local_stream.conf.xml"),
     (Path(settings.FREESWITCH_DIR) / "sounds/sipv_moh_backups", "moh"),
 ]
 
