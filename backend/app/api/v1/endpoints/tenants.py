@@ -7,6 +7,7 @@ from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.crypto import encrypt
+from app.core.default_parking import ensure_default_parking
 from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
 from app.models.tenant import Tenant
 from app.models.server import SipvServer
@@ -129,6 +130,7 @@ async def create_tenant(payload: TenantCreate, db: AsyncSession = Depends(get_db
     t = Tenant(context_prefix=context_prefix, server_id=default_server.id if default_server else None, **payload.model_dump())
     db.add(t)
     await db.flush()
+    await ensure_default_parking(db, t.id)               # chaque tenant vient avec sa zone de parcage (TASK-051)
     result = await db.execute(
         select(Tenant).options(selectinload(Tenant.extensions), selectinload(Tenant.trunks), selectinload(Tenant.dids), selectinload(Tenant.server))
         .where(Tenant.id == t.id)

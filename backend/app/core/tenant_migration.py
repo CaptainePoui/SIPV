@@ -29,6 +29,7 @@ from sqlalchemy import select, delete, update, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.default_parking import default_numbers, ensure_default_parking, has_parking
 from app.models.cdr import CDR
 from app.models.dialplan import OutboundRoute, InboundRoute
 from app.models.e911 import E911Address, DID911Assignment, ExtensionE911Assignment
@@ -48,13 +49,13 @@ PROMPT_DIR = Path(settings.APP_DIR) / "backend/uploads/audio_prompts"
 MOH_DIR = Path(settings.APP_DIR) / "backend/uploads/moh_files"
 BACKUP_DIR = Path.home() / "migration_backups"
 
-# Sortes d'objets « avec un choix » : (cle, modele, libelle, copiable)
+# Sortes d'objets « avec un choix » : (cle, modele, libelle, copiable). Le parcage n'en fait pas partie : chaque tenant a
+# sa propre zone, la destination en recoit une si elle n'en a pas, la source garde la sienne (TASK-051, 2026-10-11).
 KINDS = [
     ("ring_groups", RingGroup, "Groupe d'appel", True),
     ("queues", Queue, "File d'attente", True),
     ("paging_groups", PagingGroup, "Groupe d'interphone", True),
     ("pickup_groups", PickupGroup, "Groupe d'interception", True),
-    ("parking_lots", ParkingLot, "Parcage", True),
     ("ivrs", IVR, "IVR", True),
     ("schedules", Schedule, "Horaire", True),
     ("prompts", AudioPrompt, "Message enregistré", True),
@@ -77,8 +78,6 @@ def _name(kind: str, o) -> str:
         return o.name
     if kind in ("ring_groups", "paging_groups"):
         return f"{o.name} ({o.extension})"
-    if kind == "parking_lots":
-        return f"{o.name} ({o.park_extension}, {o.parking_slots_start}-{o.parking_slots_end})"
     return getattr(o, "name", None) or str(o.id)
 
 
@@ -210,11 +209,20 @@ async def _plan(db: AsyncSession, sel: dict) -> dict:
                     if o.extension in used:
                         conflicts.append(f"Le numéro {o.extension} du {LABELS[kind].lower()} « {o.name} » existe déjà dans {dst.account_number}.")
                     used.add(o.extension)
-                if kind == "parking_lots":
-                    nums = {o.park_extension} | {str(n) for n in range(o.parking_slots_start, o.parking_slots_end + 1)}
-                    if nums & used:
-                        conflicts.append(f"Les numéros du parcage « {o.name} » chevauchent ceux de {dst.account_number}.")
-                    used |= nums
+
+    # Parcage automatique : la destination a toujours sa propre zone (creee ici si elle n'en a pas)
+    if not await has_parking(db, dst.id):
+        clash = default_numbers() & used
+        if clash:
+            conflicts.append(f"{dst.account_number} n'a pas encore de zone de parcage : celle par défaut (700, 701-720) doit être créée, "
+                             f"mais {', '.join(sorted(clash, key=int))} y est déjà utilisé — choisissez un autre numéro de poste.")
+        else:
+            steps.append(f"Zone de parcage de {dst.account_number} créée (700, places 701-720).")
+    old_numbers = {e.extension for e in exts.values()}
+    for lot in (await db.execute(select(ParkingLot).where(ParkingLot.tenant_id == src.id))).scalars().all():
+        if lot.return_extension in old_numbers:
+            warnings.append(f"Le parcage de {src.account_number} renvoie les appels oubliés au poste {lot.return_extension}, qui part : "
+                            "changez son poste de retour.")
 
     # Trunks et routes sortantes : une route ne part pas sans son trunk, un trunk ne laisse pas ses routes derriere
     for r in loaded["outbound_routes"]:
@@ -500,12 +508,7 @@ async def execute(db: AsyncSession, sel: dict) -> dict:
             for e in exts.values():
                 if e.pickup_group == g.name:
                     e.pickup_group = None
-    for lot in loaded["parking_lots"]:
-        a = actions["parking_lots"].get(lot.id, "leave")
-        if a == "move":
-            lot.tenant_id = dst.id
-        elif a == "copy":
-            db.add(_clone(ParkingLot, lot, tenant_id=dst.id))
+    await ensure_default_parking(db, dst.id)
     for ivr in loaded["ivrs"]:
         a = actions["ivrs"].get(ivr.id, "leave")
         if a == "move":

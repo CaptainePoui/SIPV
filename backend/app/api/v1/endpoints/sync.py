@@ -14,6 +14,7 @@ from app.core.database import get_db
 from app.core.config import settings
 from app.core.did_route_sync import sync_inbound_route_from_did
 from app.core import erpcrm_client
+from app.core.default_parking import ensure_default_parking
 from app.models.tenant import Tenant
 from app.models.server import SipvServer
 from app.models.sip import SIPExtension, TenantDID
@@ -64,6 +65,8 @@ async def sync_company(payload: ERPCRMCompanySync, db: AsyncSession = Depends(ge
             server_id=servers[0] if len(servers) == 1 else None,
         )
         db.add(tenant)
+        await db.flush()
+        await ensure_default_parking(db, tenant.id)      # chaque tenant vient avec sa zone de parcage (TASK-051)
         await db.commit()
         await db.refresh(tenant)
         return SyncResult(action="created", tenant_id=str(tenant.id), account_number=tenant.account_number, company_name=tenant.company_name)
