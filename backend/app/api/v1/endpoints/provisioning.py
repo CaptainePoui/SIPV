@@ -293,6 +293,24 @@ BUTTON_TYPE_TO_GS_MODE = {
 }
 
 
+VPK_KEYS_PER_PAGE, VPK_PAGES = 8, 4
+
+
+def _vpk_keys(buttons) -> list[dict]:
+    by_index = {(b.page or 0) * VPK_KEYS_PER_PAGE + b.position: b for b in buttons}
+    out = []
+    for i in range(1, VPK_KEYS_PER_PAGE * VPK_PAGES + 1):
+        b = by_index.get(i)
+        out.append({"base": 23800 + (i - 1) * 4,
+                    "mode": BUTTON_TYPE_TO_GS_MODE.get(b.button_type, -1) if b else -1,
+                    "account": (b.sip_account_index - 1) if b else 0,
+                    "label": (b.label or "") if b else "",
+                    "value": (b.value or b.destination or "") if b else ""})
+    return out
+
+
+
+
 @router.get("/{phone_id}/config", response_class=PlainTextResponse)
 async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     """Returns rendered provisioning config for the phone. No auth — phones fetch this directly."""
@@ -390,6 +408,9 @@ async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_d
         "mac": phone.mac_address.replace(":", "").lower(),
         "options": options,
         "buttons": sorted(phone.buttons, key=lambda b: (b.page, b.position)),
+        # Les 32 touches (4 pages de 8) toujours envoyees, a leur vraie position ; non definie = « aucune » (-1) -- sinon le
+        # telephone garde ses anciens reglages (page 2 fantome, 0070)
+        "vpk_keys": _vpk_keys(phone.buttons),
         "button_mode": BUTTON_TYPE_TO_GS_MODE,
         "config_host": f"{settings.SIPV_HOST}:8020",
         "provision_host": settings.SIPV_HOST,
