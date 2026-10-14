@@ -281,30 +281,51 @@ PHONE_OPTION_SYSTEM_DEFAULTS = {
     "language": "auto",
 }
 
-# Mode de touche programmable Grandstream pour le bloc P238xx -- legende confirmee
-# empiriquement contre un fichier ScopServ reellement fonctionnel (11=BLF, 10=Speed
-# Dial), qui ne correspond PAS a la legende "Dynamic VPK" (0-26) imprimee a cote de
-# ce champ dans la doc officielle Grandstream mais a la legende "Fixed VPK" (-1-36) --
-# la doc semble mal etiquetee pour les VPK au-dela du 6e. On suit le fichier reel.
-BUTTON_TYPE_TO_GS_MODE = {
-    "line": 0, "blf": 11, "speed_dial": 10, "park": 19, "park_retrieve": 26,
-    "voicemail": 16, "transfer": 18, "intercom": 20, "paging": 23, "dnd": 32,
-    "forward": 31, "queue": 11, "agent_login": 10, "agent_logout": 10,
-    "agent_pause": 10, "pickup_group": 10, "feature_code": 10, "door": 10,
-    "directory": 29,
+# Touches programmables Grandstream GXP21xx (VPK), lues du gabarit officiel du firmware 1.0.11.106
+# (~/GrandStream/Template_Config_Pcode/config-template/gxp2130_40_60_70_35_config_1.0.11.106.txt, 2026-10-14) :
+# - touche n <= 6 : mode P1363+2(n-1), compte P1364+2(n-1), description P1465+2(n-1), valeur P1466+2(n-1) ;
+# - touche n >= 7 : P23800+4(n-7) (+0 mode, +1 compte, +2 description, +3 valeur).
+# Regle verifiee touche par touche pour les 5 modeles du gabarit. (fixes, total) par modele : les touches fixes sont les
+# touches physiques (page 1) ; les dynamiques forment les pages suivantes.
+GS_VPK_LAYOUT = {"GXP2130": (3, 12), "GXP2140": (4, 16), "GXP2160": (6, 24), "GXP2135": (8, 32), "GXP2170": (12, 48)}
+
+# Modes, legende des touches fixes du gabarit. Une touche dynamique prend le meme code moins 10 (legende « Dynamic VPK »)
+# et n'accepte ni Ligne ni Ligne partagee. (L'ancienne table appliquait la legende fixe aux touches dynamiques :
+# Parcage 19 = « Information », Parcage surveille 26 = « Verrouillage clavier » -- erreur corrigee le 2026-10-14.)
+GS_KEY_MODES = {
+    "none": -1, "line": 0, "shared_line": 1, "speed_dial": 10, "blf": 11, "presence_watcher": 12, "eventlist_blf": 13,
+    "speed_dial_active": 14, "dial_dtmf": 15, "voicemail": 16, "call_return": 17, "transfer": 18, "park": 19,
+    "intercom": 20, "ldap_search": 21, "conference": 22, "paging": 23, "record": 24, "call_log": 25,
+    "park_retrieve": 26, "menu": 27, "xml_app": 28, "information": 29, "message": 30, "forward": 31, "dnd": 32,
+    "redial": 33, "instant_messages": 34, "multicast_listen": 35, "keypad_lock": 36,
+    # Fonctions SIPV sans mode Grandstream propre : BLF sur la file, sinon numerotation rapide du code de fonction
+    "queue": 11, "agent_login": 10, "agent_logout": 10, "agent_pause": 10, "pickup_group": 10, "feature_code": 10,
+    "door": 10,
 }
+VPK_KEYS_PER_PAGE = 8
 
 
-VPK_KEYS_PER_PAGE, VPK_PAGES = 8, 4
+def _vpk_pcodes(n: int) -> tuple[int, int, int, int]:
+    if n <= 6:
+        return 1363 + 2 * (n - 1), 1364 + 2 * (n - 1), 1465 + 2 * (n - 1), 1466 + 2 * (n - 1)
+    base = 23800 + 4 * (n - 7)
+    return base, base + 1, base + 2, base + 3
 
 
-def _vpk_keys(buttons) -> list[dict]:
+def _vpk_keys(buttons, model_name: str | None) -> list[dict]:
+    """Toutes les touches fixes (non definie = aucune), puis les dynamiques dans l'ordre jusqu'a la derniere definie
+    (le gabarit : une touche dynamique sautee efface toutes celles qui suivent)."""
+    fixed, total = GS_VPK_LAYOUT.get((model_name or "").upper(), (0, 0))
     by_index = {(b.page or 0) * VPK_KEYS_PER_PAGE + b.position: b for b in buttons}
+    last = max((i for i, b in by_index.items() if i <= total and b.button_type != "none"), default=0)
     out = []
-    for i in range(1, VPK_KEYS_PER_PAGE * VPK_PAGES + 1):
-        b = by_index.get(i)
-        out.append({"base": 23800 + (i - 1) * 4,
-                    "mode": BUTTON_TYPE_TO_GS_MODE.get(b.button_type, -1) if b else -1,
+    for n in range(1, max(fixed, last) + 1):
+        b = by_index.get(n)
+        mode = GS_KEY_MODES.get(b.button_type, -1) if b else -1
+        if n > fixed and mode != -1:
+            mode = mode - 10 if mode >= 10 else -1          # Ligne / Ligne partagee impossibles sur une touche dynamique
+        pm, pa, pd, pv = _vpk_pcodes(n)
+        out.append({"n": n, "p_mode": pm, "p_account": pa, "p_label": pd, "p_value": pv, "mode": mode,
                     "account": (b.sip_account_index - 1) if b else 0,
                     "label": (b.label or "") if b else "",
                     "value": (b.value or b.destination or "") if b else ""})
@@ -410,10 +431,8 @@ async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_d
         "mac": phone.mac_address.replace(":", "").lower(),
         "options": options,
         "buttons": sorted(phone.buttons, key=lambda b: (b.page, b.position)),
-        # Les 32 touches (4 pages de 8) toujours envoyees, a leur vraie position ; non definie = « aucune » (-1) -- sinon le
-        # telephone garde ses anciens reglages (page 2 fantome, 0070)
-        "vpk_keys": _vpk_keys(phone.buttons),
-        "button_mode": BUTTON_TYPE_TO_GS_MODE,
+        # Touches a leurs vrais codes Grandstream, par modele (0072)
+        "vpk_keys": _vpk_keys(phone.buttons, model.model if model else None),
         "config_host": f"{settings.SIPV_HOST}:8020",
         "provision_host": settings.SIPV_HOST,
         # P48 (proxy SIP) : adresse publique (0069), sauf poste coche « Interne » -> adresse interne de son serveur
