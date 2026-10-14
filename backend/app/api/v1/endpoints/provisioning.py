@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 from jinja2 import Environment, BaseLoader, TemplateError
 from cryptography.fernet import Fernet
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
@@ -302,7 +302,7 @@ async def default_phone_options(db: AsyncSession, server) -> dict:
 
 
 @router.get("/{phone_id}/config", response_class=PlainTextResponse)
-async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_db), record: bool = True):
     """Returns rendered provisioning config for the phone. No auth — phones fetch this directly."""
     result = await db.execute(
         select(ProvisionedPhone)
@@ -382,15 +382,16 @@ async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_d
     except TemplateError as e:
         raise HTTPException(status_code=500, detail=f"Erreur template: {e}")
 
-    # Update last_provisioned
-    phone.last_provisioned = datetime.now(timezone.utc)
-    await db.commit()
+    # Date de la config prise : seulement quand c'est un telephone qui la demande (un test depuis le serveur ne compte pas)
+    if record:
+        phone.last_provisioned = datetime.now(timezone.utc)
+        await db.commit()
 
     return rendered
 
 
 @router.get("/gs/cfg{mac_hex}", response_class=PlainTextResponse)
-async def grandstream_config(mac_hex: str, db: AsyncSession = Depends(get_db)):
+async def grandstream_config(mac_hex: str, request: Request, db: AsyncSession = Depends(get_db)):
     """Adresse standard Grandstream (TASK-051 cote ERPCRM, 2026-10-10) : un telephone dont le serveur de configuration
     est seulement l adresse du serveur demande « /cfg<mac> » a la racine (le serveur web y renvoie ici). Repond la
     configuration du telephone directement (sans redirection)."""
@@ -401,7 +402,7 @@ async def grandstream_config(mac_hex: str, db: AsyncSession = Depends(get_db)):
     phone = (await db.execute(select(ProvisionedPhone).where(ProvisionedPhone.mac_address == mac))).scalar_one_or_none()
     if not phone:
         raise HTTPException(status_code=404, detail="MAC non enregistrée")
-    return await get_phone_config(phone.id, db)
+    return await get_phone_config(phone.id, db, record="Grandstream" in request.headers.get("user-agent", ""))
 
 
 @router.get("/mac/{mac_address}/config", response_class=PlainTextResponse)

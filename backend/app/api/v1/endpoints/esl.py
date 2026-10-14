@@ -36,6 +36,7 @@ class RegistrationOut(BaseModel):
     port: str | None = None
     registered_count: int = 0  # nombre d'appareils enregistres simultanement pour ce poste (TASK-S011.2)
     call_state: str = "idle"  # idle | ringing | active (TASK-023.7 -- statut d'appel en direct)
+    config_taken_at: datetime | None = None  # derniere config prise par un telephone du poste (2026-10-14)
 
 
 def _parse_registrations(raw: str) -> dict[str, list[dict]]:
@@ -205,6 +206,12 @@ async def tenant_registrations(
 
     regs = _parse_registrations(raw)
     channel_states = _parse_channel_states(channels_raw)
+    from app.models.provisioning import ProvisionedPhone
+    from sqlalchemy import func
+    taken = dict((await db.execute(
+        select(ProvisionedPhone.extension_id, func.max(ProvisionedPhone.last_provisioned))
+        .where(ProvisionedPhone.extension_id.in_([e.id for e in extensions]), ProvisionedPhone.is_active == True)
+        .group_by(ProvisionedPhone.extension_id))).all())
     out = []
     for ext in extensions:
         # Seuls les enregistrements sous le BON domaine comptent (TASK-023.28,
@@ -221,6 +228,7 @@ async def tenant_registrations(
             port=reg["port"] if reg else None,
             registered_count=len(reg_list),
             call_state=_lookup_call_state(channel_states, ext.username),
+            config_taken_at=taken.get(ext.id),
         ))
     return out
 

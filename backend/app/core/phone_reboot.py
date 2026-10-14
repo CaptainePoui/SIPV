@@ -52,7 +52,7 @@ async def registered_realms(username: str) -> set[str]:
     return {r["realm"] for r in await registrations(username)}
 
 
-def _send_to_kamailio(contact: str, identity: str, user: str, password: str, key: str) -> bool:
+def _send_to_kamailio(contact: str, identity: str, user: str, password: str, key: str, event: str = "check-sync") -> bool:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(2.0)
     try:
@@ -63,7 +63,7 @@ def _send_to_kamailio(contact: str, identity: str, user: str, password: str, key
                f"Via: SIP/2.0/UDP {KAMAILIO[0]}:{port};branch=z9hG4bK{branch};rport\r\n"
                f"Max-Forwards: 70\r\nFrom: <sip:sipv@{KAMAILIO[0]}>;tag={tag}\r\nTo: <sip:sipv-check-sync@{KAMAILIO[0]}>\r\n"
                f"Call-ID: {callid}\r\nCSeq: 1 MESSAGE\r\nX-Sipv-Key: {key}\r\nX-Target: {contact}\r\nX-Identity: {identity}\r\n"
-               f"X-Auth-User: {user}\r\nX-Auth-Pass: {password}\r\nContent-Length: 0\r\n\r\n")
+               f"X-Auth-User: {user}\r\nX-Auth-Pass: {password}\r\nX-Event: {event}\r\nContent-Length: 0\r\n\r\n")
         sock.sendto(msg.encode(), KAMAILIO)
         data, _ = sock.recvfrom(4096)
         return data.startswith(b"SIP/2.0 202")
@@ -73,16 +73,20 @@ def _send_to_kamailio(contact: str, identity: str, user: str, password: str, key
         sock.close()
 
 
-async def reboot_phones(username: str, password: str | None = None) -> int:
-    """Nombre d'enregistrements a qui l'ordre de redemarrer a ete envoye (0 = aucun telephone enregistre)."""
+async def reboot_phones(username: str, password: str | None = None, reboot: bool = True) -> int:
+    """Nombre d'enregistrements a qui l'ordre a ete envoye (0 = aucun telephone enregistre). reboot=False : « Pousser la
+    config » (Philippe, 2026-10-14) -- le telephone relit sa configuration sans redemarrer (check-sync;reboot=false)."""
     regs = await registrations(username)
     key = _ctrl_key()
+    event = "check-sync" if reboot else "check-sync;reboot=false"
     esl = None
     for r in regs:
         ok = False
         if password and key:
-            ok = await asyncio.to_thread(_send_to_kamailio, r["contact"], f"sip:{username}@{r['realm']}", username, password, key)
-        if not ok:          # repli : FreeSWITCH (sans authentification ; refuse par un telephone qui l'exige)
+            ok = await asyncio.to_thread(_send_to_kamailio, r["contact"], f"sip:{username}@{r['realm']}", username, password, key, event)
+        if not ok and reboot:   # repli : FreeSWITCH (sans authentification ; refuse par un telephone qui l'exige)
             esl = esl or await get_esl()
             await esl.api(f"sofia profile internal check_sync {username}@{r['realm']}")
+        elif not ok:
+            raise RuntimeError("Kamailio n'a pas accepté l'ordre")
     return len(regs)

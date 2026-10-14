@@ -827,3 +827,21 @@ async def reboot_extension_phones(ext_id: uuid.UUID, db: AsyncSession = Depends(
         raise HTTPException(status_code=409, detail=f"Aucun téléphone enregistré sous {ext.username}")
     return {"rebooted": n, "username": ext.username}
 
+
+
+@router.post("/{ext_id}/push-config")
+async def push_extension_config(ext_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    """Bouton « Pousser la config » d ERPCRM (2026-10-14) : les telephones du poste relisent leur configuration sans
+    redemarrer (NOTIFY check-sync;reboot=false). La date de la config prise se voit ensuite a cote du poste."""
+    ext = await db.get(SIPExtension, ext_id)
+    if not ext:
+        raise HTTPException(status_code=404, detail="Poste introuvable")
+    from app.core.phone_reboot import reboot_phones
+    try:
+        from app.core.crypto import decrypt
+        n = await reboot_phones(ext.username, decrypt(ext.password), reboot=False)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Ordre non envoyé : {e}")
+    if not n:
+        raise HTTPException(status_code=409, detail=f"Aucun téléphone enregistré sous {ext.username}")
+    return {"pushed": n, "username": ext.username}
