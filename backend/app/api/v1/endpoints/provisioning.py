@@ -313,13 +313,13 @@ def _vpk_pcodes(n: int) -> tuple[int, int, int, int]:
 
 
 def _vpk_keys(buttons, model_name: str | None) -> list[dict]:
-    """Toutes les touches fixes (non definie = aucune), puis les dynamiques dans l'ordre jusqu'a la derniere definie
-    (le gabarit : une touche dynamique sautee efface toutes celles qui suivent)."""
+    """Toutes les touches du modele, dans l'ordre (le gabarit : une touche dynamique, meme « aucune », doit etre envoyee
+    a sa place). Philippe (2026-10-14) : une page non ajoutee = ses touches a « aucune » -- sinon le telephone garde
+    ses anciens reglages."""
     fixed, total = GS_VPK_LAYOUT.get((model_name or "").upper(), (0, 0))
     by_index = {(b.page or 0) * VPK_KEYS_PER_PAGE + b.position: b for b in buttons}
-    last = max((i for i, b in by_index.items() if i <= total and b.button_type != "none"), default=0)
     out = []
-    for n in range(1, max(fixed, last) + 1):
+    for n in range(1, total + 1):
         b = by_index.get(n)
         mode = GS_KEY_MODES.get(b.button_type, -1) if b else -1
         if n > fixed and mode != -1:
