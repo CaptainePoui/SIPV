@@ -79,43 +79,35 @@ def merge_keys(template_items, phone_buttons) -> list:
     return list(by_index.values())
 
 
-# Boutons sous l'ecran (softkeys), gabarit « alias » (noms au lieu de P-codes).
-SOFTKEY_IDLE_COUNT = 3        # pks.softkey.1-3 (ecran au repos)
-SOFTKEY_CALL_COUNT = 3        # pks.scSoftkey.1-3 (ecran pendant un appel)
-SOFTKEY_IDLE_MODES = [("Default", "Par défaut"), ("SpeedDial", "Numérotation rapide"),
-                      ("SpeedDialViaActiveAccount", "Numérotation rapide (compte actif)"), ("VoiceMail", "Messagerie vocale"),
-                      ("CallReturn", "Rappeler le dernier appel"), ("Intercom", "Intercom"), ("LDAPSearch", "Recherche LDAP"),
-                      ("CallLog", "Journal d'appels"), ("Menu", "Menu"), ("Information", "Information"),
-                      ("Message", "Message")]
-SOFTKEY_CALL_MODES = [m for m in SOFTKEY_IDLE_MODES if m[0] != "Menu"]
-# Boutons systeme de l'ecran au repos qu'on peut cacher (softkeys.state.idle.hideSystemKeys)
-SOFTKEY_IDLE_SYSTEM = ["Next", "History", "ForwardAll", "Redial"]
-# Disposition des boutons par etat d'appel : (nom de l'element, libelle, options possibles, valeur par defaut du gabarit)
+# Boutons sous l'ecran (softkeys) : disposition par etat d'appel (« Custom Call Screen Softkey Layout »), gabarit « alias »
+# (noms au lieu de P-codes). Philippe (2026-10-14) : seulement les options des softkeys -- pas les touches programmables
+# de l'ecran au repos (pks.softkey / pks.scSoftkey), qui sont des touches ordinaires.
+# (nom de l'element, libelle, options possibles du gabarit, preference Simple IP = config de Philippe sur ses telephones)
 SOFTKEY_STATES = [
     ("inDialing", "En composition",
      "BTPhonebook,BTOnOff,EndCall,ReConf,ConfRoom,Redial,Dial,Backspace,PickUp,Target",
-     "BTPhonebook,BTOnOff,EndCall,ReConf,ConfRoom,Redial,Dial,Backspace,PickUp,Target"),
-    ("inOnhookDialing", "Composition combiné raccroché",
+     "EndCall,Redial,Dial,Backspace,Target"),
+    ("inOnhookDialing", "Composition sans décrocher",
      "BTPhonebook,DirectIP,Onhook,Cancel,Dial,Backspace,Target",
-     "BTPhonebook,DirectIP,Onhook,Cancel,Dial,Backspace,Target"),
-    ("InRinging", "Ça sonne", "Answer,Reject,Forward,ReConf,Custom-Silence", "Answer,Reject,Forward,ReConf"),
-    ("inCalling", "Appel en cours de composition", "BTOnOff,Cancel,EndCall,ReConf,ConfRoom,ConfCall",
-     "BTOnOff,Cancel,EndCall,ReConf,ConfRoom,ConfCall"),
+     "Cancel,Dial,Backspace,Onhook,Target"),
+    ("InRinging", "Ça sonne", "Answer,Reject,Forward,ReConf,Custom-Silence", "Reject,Answer,Forward"),
+    ("inCalling", "Appel en cours de composition", "BTOnOff,Cancel,EndCall,ReConf,ConfRoom,ConfCall", "EndCall"),
     ("inCallConnected", "En appel",
      "BTPhonebook,BTOnOff,EndCall,ReConf,ConfRoom,Custom-Confcall,Cancel,NewCall,Swap,Transfer,Trnf>VM,DialDTMF,"
      "BSCCenter,URecord,Record,UCallPark,PrivateHold,CallPark,Custom-Hold,Custom-Conference,Custom-Mute",
-     "BTPhonebook,BTOnOff,EndCall,ReConf,ConfRoom,Custom-Confcall,Cancel,NewCall,Swap,Transfer,Trnf>VM,DialDTMF,"
-     "BSCCenter,URecord,Record,UCallPark,PrivateHold,CallPark"),
+     "EndCall,NewCall,Transfer,Cancel,Swap,Record"),
     ("inConferenceConnected", "En conférence",
      "BTOnOff,EndCall,Kick,NewCall,Trnf>VM,DialDTMF,BSCCenter,URecord,Record,ConfRoom,Add,Custom-Hold,Custom-Split,Custom-Mute",
-     "BTOnOff,EndCall,Kick,NewCall,Trnf>VM,DialDTMF,BSCCenter,URecord,Record,ConfRoom,Add"),
+     "EndCall,NewCall,Record"),
     ("inOnhold", "En garde", "ReConf,Resume,HoldTrnf,ConfCall,Add,Custom-NewCall,Custom-EndCall",
-     "ReConf,Resume,HoldTrnf,ConfCall,Add"),
-    ("inCallFailed", "Appel échoué", "EndCall,ReConf,ConfRoom,Custom-NewCall", "EndCall,ReConf,ConfRoom"),
+     "Custom-EndCall,Custom-NewCall,Resume,Add"),
+    ("inCallFailed", "Appel échoué", "EndCall,ReConf,ConfRoom,Custom-NewCall", "EndCall,Custom-NewCall"),
     ("inTransfer", "En transfert", "BTOnOff,Cancel,BlindTrnf,AttTrnf,Backspace,Target",
-     "BTOnOff,Cancel,BlindTrnf,AttTrnf,Backspace,Target"),
-    ("inConference", "Ajout à une conférence", "BTOnOff,Cancel,Dial,Backspace,Target", "BTOnOff,Cancel,Dial,Backspace,Target"),
+     "Cancel,BlindTrnf,AttTrnf,Backspace,Target"),
+    ("inConference", "Ajout à une conférence", "BTOnOff,Cancel,Dial,Backspace,Target", "Cancel,Dial,Backspace,Target"),
 ]
+# Libelles affiches (comme la page web du telephone) ; les autres s'affichent tels quels
+SOFTKEY_LABELS = {"BTPhonebook": "Phonebook (BT)", "BTOnOff": "BT On/Off"}
 
 
 def key_catalog(model_name: str | None) -> dict | None:
@@ -129,37 +121,17 @@ def key_catalog(model_name: str | None) -> dict | None:
         "fixed": fixed, "total": total, "per_page": VPK_KEYS_PER_PAGE, "pages": -(-total // VPK_KEYS_PER_PAGE),
         "modes": [{"key": k, "label": l, "fixed_only": k in FIXED_ONLY_MODES} for k, l in GS_KEY_MODE_LABELS],
         "softkeys": {
-            "idle_count": SOFTKEY_IDLE_COUNT, "call_count": SOFTKEY_CALL_COUNT,
-            "idle_modes": [{"key": k, "label": l} for k, l in SOFTKEY_IDLE_MODES],
-            "call_modes": [{"key": k, "label": l} for k, l in SOFTKEY_CALL_MODES],
-            "idle_system": SOFTKEY_IDLE_SYSTEM,
+            "labels": SOFTKEY_LABELS,
             "states": [{"key": k, "label": l, "options": o.split(","), "default": d.split(",")} for k, l, o, d in SOFTKEY_STATES],
         },
     }
 
 
 def softkey_items(softkeys: dict | None) -> list[tuple[str, str]]:
-    """Elements « alias » a envoyer pour les boutons sous l'ecran d'un modele de provisionnement. Tout est envoye
-    (non defini = valeur par defaut du gabarit), pour que le telephone ne garde pas d'anciens reglages."""
-    sk = softkeys or {}
-    out: list[tuple[str, str]] = []
-    idle = sk.get("idle") or []
-    for i in range(SOFTKEY_IDLE_COUNT):
-        k = idle[i] if i < len(idle) else {}
-        out += [(f"pks.softkey.{i + 1}.keyMode", k.get("mode") or "Default"),
-                (f"pks.softkey.{i + 1}.account", str(k.get("account") or 0)),
-                (f"pks.softkey.{i + 1}.description", k.get("description") or ""),
-                (f"pks.softkey.{i + 1}.value", k.get("value") or "")]
-    call = sk.get("call") or []
-    for i in range(SOFTKEY_CALL_COUNT):
-        k = call[i] if i < len(call) else {}
-        out += [(f"pks.scSoftkey.{i + 1}.mode", k.get("mode") or "Default"),
-                (f"pks.scSoftkey.{i + 1}.description", k.get("description") or ""),
-                (f"pks.scSoftkey.{i + 1}.value", k.get("value") or "")]
-    out.append(("softkeys.state.idle.hideSystemKeys", ",".join(sk.get("hide_idle") or [])))
-    layouts = sk.get("layouts") or {}
-    custom = any(layouts.get(k) and layouts[k] != d.split(",") for k, _, _, d in SOFTKEY_STATES)
-    out.append(("softkeys.layout.enable", "Yes" if custom else "No"))
+    """Elements « alias » des boutons sous l'ecran d'un modele de provisionnement : la disposition de chaque etat d'appel
+    (non definie = preference Simple IP). Tout est envoye pour que le telephone ne garde pas d'anciens reglages."""
+    layouts = (softkeys or {}).get("layouts") or {}
+    out: list[tuple[str, str]] = [("softkeys.layout.enable", "Yes")]
     for k, _, _, d in SOFTKEY_STATES:
         out.append((f"softkeys.layout.state.{k}", ",".join(layouts.get(k) or d.split(","))))
     return out
