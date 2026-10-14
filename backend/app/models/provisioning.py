@@ -45,6 +45,8 @@ class ProvisionedPhone(Base):
     # ce poste (ex: "defaut" + "oreillette" + "boutons de park"), fusionnes
     # dans l'ordre du tableau. Tableau vide = aucun, la chaine d'heritage saute
     # ce niveau.
+    # Modele de provisionnement choisi pour ce poste (TASK-051, 2026-10-14) : lien, pas copie -- le modele change, le poste suit
+    button_template_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("phone_button_templates.id", ondelete="SET NULL"))
     selected_tenant_model_template_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list, server_default="{}")
 
     # --- TASK-S011.2 : fiche physique du poste ---
@@ -98,13 +100,18 @@ class PhoneButton(Base):
 
 
 class PhoneButtonTemplate(Base):
-    """Modele de configuration de boutons reutilisable (TASK-023.25) -- cree a
-    partir d'un ProvisionedPhone existant, applicable a d'autres appareils."""
+    """Modele de provisionnement d'une compagnie (TASK-023.25 ; TASK-051, 2026-10-14) : pour un modele de telephone, ses
+    touches (par page) et ses boutons sous l'ecran. Cree dans Telephonie -> Provisionnement ou depuis un poste
+    (« Sauvegarder comme modele ») ; un poste le choisit (ProvisionedPhone.button_template_id)."""
     __tablename__ = "phone_button_templates"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    phone_model_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("phone_models.id", ondelete="SET NULL"))
+    pages: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)   # pages affichees (ajoutees)
+    options: Mapped[dict | None] = mapped_column(JSON)                                           # options du telephone (langue...)
+    softkeys: Mapped[dict | None] = mapped_column(JSON)                                          # boutons sous l'ecran
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     items: Mapped[list["PhoneButtonTemplateItem"]] = relationship("PhoneButtonTemplateItem", back_populates="template", cascade="all, delete-orphan")

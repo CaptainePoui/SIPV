@@ -17,9 +17,11 @@ from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_serv
 from app.models.provisioning import PhoneModel, ProvisionedPhone, PhoneButton, PhoneButtonTemplate, PhoneButtonTemplateItem, GlobalTemplate, TenantTemplate, TenantModelTemplate
 from app.models.sip import SIPExtension
 from app.models.tenant import Tenant
+from app.models.server import SipvServer
 from app.models.user import User
 
 from app.api.v1.endpoints.internal_devices import internal_address
+from app.core.grandstream_keys import vpk_keys, merge_keys, key_catalog, softkey_items, GS_KEY_MODES
 
 router = APIRouter()
 
@@ -133,6 +135,7 @@ class PhoneOut(BaseModel):
     expansion_module: str | None
     provisioning_protocol: str
     selected_tenant_model_template_ids: list[uuid.UUID] = []  # TASK-S044.2
+    button_template_id: uuid.UUID | None = None               # modele de provisionnement choisi (TASK-051)
     # Calcule a la volee depuis last_provisioned, pas stocke (TASK-S011.2) -- "jamais" ou
     # "provisionne" (avec la date deja dans last_provisioned). Pas de palier "en retard" :
     # aucun seuil precis n'a ete demande, on n'en invente pas un arbitraire.
@@ -191,6 +194,7 @@ def _phone_out(p: ProvisionedPhone, reveal: bool = False) -> PhoneOut:
         headset_used=p.headset_used, expansion_module=p.expansion_module,
         provisioning_protocol=p.provisioning_protocol,
         selected_tenant_model_template_ids=p.selected_tenant_model_template_ids or [],
+        button_template_id=p.button_template_id,
         provisioning_status="provisionne" if p.last_provisioned else "jamais",
     )
     if reveal:
@@ -281,55 +285,18 @@ PHONE_OPTION_SYSTEM_DEFAULTS = {
     "language": "auto",
 }
 
-# Touches programmables Grandstream GXP21xx (VPK), lues du gabarit officiel du firmware 1.0.11.106
-# (~/GrandStream/Template_Config_Pcode/config-template/gxp2130_40_60_70_35_config_1.0.11.106.txt, 2026-10-14) :
-# - touche n <= 6 : mode P1363+2(n-1), compte P1364+2(n-1), description P1465+2(n-1), valeur P1466+2(n-1) ;
-# - touche n >= 7 : P23800+4(n-7) (+0 mode, +1 compte, +2 description, +3 valeur).
-# Regle verifiee touche par touche pour les 5 modeles du gabarit. (fixes, total) par modele : les touches fixes sont les
-# touches physiques (page 1) ; les dynamiques forment les pages suivantes.
-GS_VPK_LAYOUT = {"GXP2130": (3, 12), "GXP2140": (4, 16), "GXP2160": (6, 24), "GXP2135": (8, 32), "GXP2170": (12, 48)}
 
-# Modes, legende des touches fixes du gabarit. Une touche dynamique prend le meme code moins 10 (legende « Dynamic VPK »)
-# et n'accepte ni Ligne ni Ligne partagee. (L'ancienne table appliquait la legende fixe aux touches dynamiques :
-# Parcage 19 = « Information », Parcage surveille 26 = « Verrouillage clavier » -- erreur corrigee le 2026-10-14.)
-GS_KEY_MODES = {
-    "none": -1, "line": 0, "shared_line": 1, "speed_dial": 10, "blf": 11, "presence_watcher": 12, "eventlist_blf": 13,
-    "speed_dial_active": 14, "dial_dtmf": 15, "voicemail": 16, "call_return": 17, "transfer": 18, "park": 19,
-    "intercom": 20, "ldap_search": 21, "conference": 22, "paging": 23, "record": 24, "call_log": 25,
-    "park_retrieve": 26, "menu": 27, "xml_app": 28, "information": 29, "message": 30, "forward": 31, "dnd": 32,
-    "redial": 33, "instant_messages": 34, "multicast_listen": 35, "keypad_lock": 36,
-    # Fonctions SIPV sans mode Grandstream propre : BLF sur la file, sinon numerotation rapide du code de fonction
-    "queue": 11, "agent_login": 10, "agent_logout": 10, "agent_pause": 10, "pickup_group": 10, "feature_code": 10,
-    "door": 10,
-}
-VPK_KEYS_PER_PAGE = 8
+async def default_phone_options(db: AsyncSession, server) -> dict:
+    """Valeurs Simple IP : defauts systeme + valeurs par defaut du serveur (son template global « par defaut »). Remplissent
+    un nouveau modele de provisionnement et s'appliquent aux postes sans modele."""
+    options = dict(PHONE_OPTION_SYSTEM_DEFAULTS)
+    if server:
+        gt = (await db.execute(select(GlobalTemplate).where(GlobalTemplate.server_id == server.id, GlobalTemplate.is_default == True,
+                                                           GlobalTemplate.is_active == True))).scalar_one_or_none()
+        if gt:
+            options.update(gt.options or {})
+    return options
 
-
-def _vpk_pcodes(n: int) -> tuple[int, int, int, int]:
-    if n <= 6:
-        return 1363 + 2 * (n - 1), 1364 + 2 * (n - 1), 1465 + 2 * (n - 1), 1466 + 2 * (n - 1)
-    base = 23800 + 4 * (n - 7)
-    return base, base + 1, base + 2, base + 3
-
-
-def _vpk_keys(buttons, model_name: str | None) -> list[dict]:
-    """Toutes les touches du modele, dans l'ordre (le gabarit : une touche dynamique, meme « aucune », doit etre envoyee
-    a sa place). Philippe (2026-10-14) : une page non ajoutee = ses touches a « aucune » -- sinon le telephone garde
-    ses anciens reglages."""
-    fixed, total = GS_VPK_LAYOUT.get((model_name or "").upper(), (0, 0))
-    by_index = {(b.page or 0) * VPK_KEYS_PER_PAGE + b.position: b for b in buttons}
-    out = []
-    for n in range(1, total + 1):
-        b = by_index.get(n)
-        mode = GS_KEY_MODES.get(b.button_type, -1) if b else -1
-        if n > fixed and mode != -1:
-            mode = mode - 10 if mode >= 10 else -1          # Ligne / Ligne partagee impossibles sur une touche dynamique
-        pm, pa, pd, pv = _vpk_pcodes(n)
-        out.append({"n": n, "p_mode": pm, "p_account": pa, "p_label": pd, "p_value": pv, "mode": mode,
-                    "account": (b.sip_account_index - 1) if b else 0,
-                    "label": (b.label or "") if b else "",
-                    "value": (b.value or b.destination or "") if b else ""})
-    return out
 
 
 
@@ -356,6 +323,12 @@ async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_d
     if not template_text:
         raise HTTPException(status_code=404, detail="Aucun template de config pour ce modèle")
 
+    btn_template = None
+    if phone.button_template_id:
+        bt = await db.execute(select(PhoneButtonTemplate).options(selectinload(PhoneButtonTemplate.items))
+                              .where(PhoneButtonTemplate.id == phone.button_template_id))
+        btn_template = bt.scalar_one_or_none()
+
     ext = None
     tenant = None
     server = None
@@ -370,52 +343,12 @@ async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_d
             tenant = ext.tenant
             server = tenant.server if tenant else None
 
-    # Fusion du catalogue d'options -- chaine d'heritage a 5 niveaux (TASK-S044/
-    # S044.1/S044.2) : systeme -> template(s) global(aux) serveur (celui
-    # is_default automatique + ceux choisis explicitement en plus, ex. "defaut"
-    # + "oreillette" + "boutons de park") -> Global Policy tenant
-    # (phone_option_defaults) -> template(s) du tenant CHOISIS explicitement ->
-    # template(s) du modele CHOISIS explicitement -> poste individuel. Le plus
-    # specifique gagne ; PLUSIEURS templates possibles au meme niveau, fusionnes
-    # dans l'ordre du tableau (le dernier du tableau gagne en cas de cle en
-    # commun entre 2 templates du meme niveau). Contrairement au is_default
-    # serveur (automatique, "policy"), tenant/modele ne s'appliquent QUE si
-    # explicitement choisis -- pas de devinette.
-    options = dict(PHONE_OPTION_SYSTEM_DEFAULTS)
-
-    if server:
-        gt = await db.execute(
-            select(GlobalTemplate).where(
-                GlobalTemplate.server_id == server.id,
-                GlobalTemplate.is_default == True,
-                GlobalTemplate.is_active == True,
-            )
-        )
-        global_template = gt.scalar_one_or_none()
-        if global_template:
-            options.update(global_template.options or {})
-
-    if tenant and tenant.selected_global_template_ids:
-        for tid in tenant.selected_global_template_ids:
-            t = await db.get(GlobalTemplate, tid)
-            if t and t.is_active:
-                options.update(t.options or {})
-
-    if tenant and tenant.phone_option_defaults:
-        options.update(tenant.phone_option_defaults)
-
-    if tenant and tenant.selected_tenant_template_ids:
-        for tid in tenant.selected_tenant_template_ids:
-            t = await db.get(TenantTemplate, tid)
-            if t and t.is_active:
-                options.update(t.options or {})
-
-    if phone.selected_tenant_model_template_ids:
-        for tid in phone.selected_tenant_model_template_ids:
-            t = await db.get(TenantModelTemplate, tid)
-            if t and t.is_active:
-                options.update(t.options or {})
-
+    # Options du telephone (TASK-051, 2026-10-14, Philippe : « c'est toutes des templates par modele ») : valeurs Simple IP
+    # (systeme + valeurs par defaut du serveur) -> modele de provisionnement choisi pour le poste -> ajustements du poste.
+    # Plus de niveaux compagnie / bibliotheques de templates (l'ancienne chaine a 5 niveaux de TASK-S044).
+    options = await default_phone_options(db, server)
+    if btn_template and btn_template.options:
+        options.update(btn_template.options)
     if phone.extra_config:
         options.update(phone.extra_config)
 
@@ -431,8 +364,10 @@ async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_d
         "mac": phone.mac_address.replace(":", "").lower(),
         "options": options,
         "buttons": sorted(phone.buttons, key=lambda b: (b.page, b.position)),
-        # Touches a leurs vrais codes Grandstream, par modele (0072)
-        "vpk_keys": _vpk_keys(phone.buttons, model.model if model else None),
+        # Touches a leurs vrais codes Grandstream, par modele (0072) : celles du modele de provisionnement du poste, puis
+        # les ajustements du poste (meme place = remplace). Boutons sous l'ecran : seulement avec un modele (0073).
+        "vpk_keys": vpk_keys(merge_keys(btn_template.items if btn_template else [], phone.buttons), model.model if model else None),
+        "softkey_items": softkey_items(btn_template.softkeys) if btn_template else [],
         "config_host": f"{settings.SIPV_HOST}:8020",
         "provision_host": settings.SIPV_HOST,
         # P48 (proxy SIP) : adresse publique (0069), sauf poste coche « Interne » -> adresse interne de son serveur
@@ -573,124 +508,223 @@ async def delete_phone_button(button_id: uuid.UUID, db: AsyncSession = Depends(g
     await db.commit()
 
 
-# ── Templates de boutons (TASK-023.25) ──────────────────────────────────────────
+# ── Modeles de provisionnement (TASK-023.25 ; refaits TASK-051, 2026-10-14) ──────────
+# Philippe : « c'est LA place » -- crees et modifies dans Telephonie -> Provisionnement de la compagnie, par modele de
+# telephone (touches par page + boutons sous l'ecran) ; « Sauvegarder comme modele » depuis un poste ajoute au meme
+# endroit ; un poste choisit un modele de son modele de telephone (lien, pas copie).
 
-class ButtonTemplateItemOut(BaseModel):
-    id: uuid.UUID
+class ButtonTemplateItemIn(BaseModel):
     position: int
-    page: int
+    page: int = 0
     button_type: str
-    label: str | None
-    value: str | None
-    destination: str | None
-    sip_account_index: int
-    client_editable: bool
-    locked_by_simpleip: bool
+    label: str | None = None
+    value: str | None = None
+    sip_account_index: int = 1
+
+class ButtonTemplateItemOut(ButtonTemplateItemIn):
+    id: uuid.UUID
 
 class ButtonTemplateOut(BaseModel):
     id: uuid.UUID
     tenant_id: uuid.UUID
     name: str
+    phone_model_id: uuid.UUID | None
+    phone_model: str | None
+    pages: int
+    options: dict | None
+    softkeys: dict | None
+    phones: int                     # postes qui l'utilisent
     created_at: datetime
     items: list[ButtonTemplateItemOut] = []
 
-class ButtonTemplateCreate(BaseModel):
+class ButtonTemplateIn(BaseModel):
     name: str
+    phone_model_id: uuid.UUID
+    pages: int = 1
+    options: dict | None = None
+    softkeys: dict | None = None
+    items: list[ButtonTemplateItemIn] = []
 
 class SaveAsTemplatePayload(BaseModel):
     name: str
 
+class PhoneTemplateLink(BaseModel):
+    button_template_id: uuid.UUID | None
 
-def _template_out(t: PhoneButtonTemplate) -> ButtonTemplateOut:
+
+async def _template_out(db: AsyncSession, t: PhoneButtonTemplate) -> ButtonTemplateOut:
+    model = await db.get(PhoneModel, t.phone_model_id) if t.phone_model_id else None
+    used = (await db.execute(select(ProvisionedPhone.id).where(ProvisionedPhone.button_template_id == t.id))).all()
     return ButtonTemplateOut(
-        id=t.id, tenant_id=t.tenant_id, name=t.name, created_at=t.created_at,
-        items=[
-            ButtonTemplateItemOut(
-                id=i.id, position=i.position, page=i.page, button_type=i.button_type,
-                label=i.label, value=i.value, destination=i.destination,
-                sip_account_index=i.sip_account_index, client_editable=i.client_editable,
-                locked_by_simpleip=i.locked_by_simpleip,
-            ) for i in (t.items or [])
-        ],
+        id=t.id, tenant_id=t.tenant_id, name=t.name, phone_model_id=t.phone_model_id,
+        phone_model=model.model if model else None, pages=t.pages, options=t.options, softkeys=t.softkeys, phones=len(used),
+        created_at=t.created_at,
+        items=[ButtonTemplateItemOut(id=i.id, position=i.position, page=i.page, button_type=i.button_type,
+                                     label=i.label, value=i.value, sip_account_index=i.sip_account_index)
+               for i in sorted(t.items or [], key=lambda i: (i.page, i.position))],
     )
+
+
+async def _load_template(db: AsyncSession, template_id: uuid.UUID) -> PhoneButtonTemplate:
+    t = (await db.execute(select(PhoneButtonTemplate).options(selectinload(PhoneButtonTemplate.items))
+                          .where(PhoneButtonTemplate.id == template_id))).scalar_one_or_none()
+    if not t:
+        raise HTTPException(status_code=404, detail="Modèle introuvable")
+    return t
+
+
+async def _check_template(db: AsyncSession, payload: ButtonTemplateIn) -> None:
+    """Refuse ce que le telephone ne peut pas recevoir : modele sans disposition connue, touche hors du telephone,
+    mode inconnu, Ligne sur une touche des pages suivantes."""
+    model = await db.get(PhoneModel, payload.phone_model_id)
+    cat = key_catalog(model.model if model else None)
+    if not cat:
+        raise HTTPException(status_code=422, detail="Ce modèle de téléphone n'a pas encore de disposition de touches")
+    if not 1 <= payload.pages <= cat["pages"]:
+        raise HTTPException(status_code=422, detail=f"Ce téléphone a au plus {cat['pages']} pages")
+    seen = set()
+    for i in payload.items:
+        n = i.page * cat["per_page"] + i.position
+        if not (0 <= i.page < payload.pages and 1 <= i.position <= cat["per_page"] and n <= cat["total"]):
+            raise HTTPException(status_code=422, detail=f"Touche {i.position} de la page {i.page + 1} : hors du téléphone")
+        if n in seen:
+            raise HTTPException(status_code=422, detail=f"Touche {i.position} de la page {i.page + 1} en double")
+        seen.add(n)
+        if i.button_type not in GS_KEY_MODES:
+            raise HTTPException(status_code=422, detail=f"Mode inconnu : {i.button_type}")
+        if n > cat["fixed"] and i.button_type in ("line", "shared_line"):
+            raise HTTPException(status_code=422, detail=f"Page {i.page + 1}, touche {i.position} : une ligne n'est possible que sur une touche physique")
+
+
+def _set_items(t: PhoneButtonTemplate, items: list[ButtonTemplateItemIn]) -> None:
+    t.items = [PhoneButtonTemplateItem(position=i.position, page=i.page, button_type=i.button_type,
+                                       label=(i.label or None), value=(i.value or None), sip_account_index=i.sip_account_index)
+               for i in items if i.button_type != "none"]
+
+
+@router.get("/key-catalog/{model_id}")
+async def get_key_catalog(model_id: uuid.UUID, tenant_id: uuid.UUID | None = None, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    """Touches, modes et boutons sous l'ecran offerts pour un modele de telephone (gabarit officiel)."""
+    model = await db.get(PhoneModel, model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail="Modèle de téléphone introuvable")
+    server = None
+    if tenant_id:
+        tenant = await db.get(Tenant, tenant_id)
+        server = await db.get(SipvServer, tenant.server_id) if tenant and tenant.server_id else None
+    return {"model": model.model, "brand": model.brand, "catalog": key_catalog(model.model),
+            "default_options": await default_phone_options(db, server)}
 
 
 @router.get("/button-templates/tenant/{tenant_id}", response_model=list[ButtonTemplateOut])
-async def list_button_templates(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
-    result = await db.execute(
-        select(PhoneButtonTemplate).options(selectinload(PhoneButtonTemplate.items))
-        .where(PhoneButtonTemplate.tenant_id == tenant_id).order_by(PhoneButtonTemplate.name)
-    )
-    return [_template_out(t) for t in result.scalars().all()]
+async def list_button_templates(tenant_id: uuid.UUID, phone_model_id: uuid.UUID | None = None, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    q = select(PhoneButtonTemplate).options(selectinload(PhoneButtonTemplate.items)).where(PhoneButtonTemplate.tenant_id == tenant_id)
+    if phone_model_id:
+        q = q.where(PhoneButtonTemplate.phone_model_id == phone_model_id)
+    return [await _template_out(db, t) for t in (await db.execute(q.order_by(PhoneButtonTemplate.name))).scalars().all()]
+
+
+@router.post("/button-templates/tenant/{tenant_id}", response_model=ButtonTemplateOut, status_code=status.HTTP_201_CREATED)
+async def create_button_template(tenant_id: uuid.UUID, payload: ButtonTemplateIn, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    if not await db.get(Tenant, tenant_id):
+        raise HTTPException(status_code=404, detail="Tenant introuvable")
+    await _check_template(db, payload)
+    t = PhoneButtonTemplate(tenant_id=tenant_id, name=payload.name.strip(), phone_model_id=payload.phone_model_id,
+                            pages=payload.pages, options=payload.options, softkeys=payload.softkeys, items=[])
+    _set_items(t, payload.items)
+    db.add(t)
+    await db.commit()
+    return await _template_out(db, await _load_template(db, t.id))
+
+
+@router.put("/button-templates/{template_id}", response_model=ButtonTemplateOut)
+async def update_button_template(template_id: uuid.UUID, payload: ButtonTemplateIn, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    t = await _load_template(db, template_id)
+    await _check_template(db, payload)
+    if payload.phone_model_id != t.phone_model_id:
+        used = (await db.execute(select(ProvisionedPhone.id).where(ProvisionedPhone.button_template_id == t.id))).first()
+        if used:
+            raise HTTPException(status_code=422, detail="Des postes utilisent ce modèle : on ne peut pas changer son modèle de téléphone")
+    t.name, t.phone_model_id, t.pages, t.options, t.softkeys = (payload.name.strip(), payload.phone_model_id, payload.pages,
+                                                                 payload.options, payload.softkeys)
+    _set_items(t, payload.items)
+    await db.commit()
+    return await _template_out(db, await _load_template(db, template_id))
 
 
 @router.delete("/button-templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_button_template(template_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
-    result = await db.execute(select(PhoneButtonTemplate).where(PhoneButtonTemplate.id == template_id))
-    t = result.scalar_one_or_none()
-    if not t:
-        raise HTTPException(status_code=404, detail="Template introuvable")
+    t = await _load_template(db, template_id)
+    if (await db.execute(select(ProvisionedPhone.id).where(ProvisionedPhone.button_template_id == t.id))).first():
+        raise HTTPException(status_code=422, detail="Des postes utilisent ce modèle : choisissez-leur un autre modèle d'abord")
     await db.delete(t)
     await db.commit()
 
 
 @router.post("/{phone_id}/save-as-template", response_model=ButtonTemplateOut, status_code=status.HTTP_201_CREATED)
 async def save_phone_as_template(phone_id: uuid.UUID, payload: SaveAsTemplatePayload, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
-    """Sauvegarde la config de boutons actuelle d'un telephone comme template reutilisable."""
+    """Les touches du poste deviennent un modele de la compagnie (meme liste que Telephonie -> Provisionnement) et le
+    poste l'utilise."""
     phone = await db.get(ProvisionedPhone, phone_id)
     if not phone:
         raise HTTPException(status_code=404, detail="Téléphone introuvable")
-    result = await db.execute(select(PhoneButton).where(PhoneButton.provisioned_phone_id == phone_id))
-    buttons = result.scalars().all()
-    t = PhoneButtonTemplate(tenant_id=phone.tenant_id, name=payload.name)
+    model = await db.get(PhoneModel, phone.phone_model_id) if phone.phone_model_id else None
+    cat = key_catalog(model.model if model else None)
+    if not cat:
+        raise HTTPException(status_code=422, detail="Ce modèle de téléphone n'a pas encore de disposition de touches")
+    buttons = (await db.execute(select(PhoneButton).where(PhoneButton.provisioned_phone_id == phone_id))).scalars().all()
+    payload_in = ButtonTemplateIn(name=payload.name, phone_model_id=model.id,
+                                  pages=max([b.page + 1 for b in buttons] + [1]),
+                                  items=[ButtonTemplateItemIn(position=b.position, page=b.page, button_type=b.button_type,
+                                                              label=b.label, value=b.value or b.destination,
+                                                              sip_account_index=b.sip_account_index) for b in buttons])
+    await _check_template(db, payload_in)
+    tenant = await db.get(Tenant, phone.tenant_id)
+    server = await db.get(SipvServer, tenant.server_id) if tenant and tenant.server_id else None
+    options = {**await default_phone_options(db, server), **(phone.extra_config or {})}
+    t = PhoneButtonTemplate(tenant_id=phone.tenant_id, name=payload.name.strip(), phone_model_id=model.id,
+                            pages=payload_in.pages, options=options, items=[])
+    _set_items(t, payload_in.items)
     db.add(t)
     await db.flush()
+    # Le poste utilise son nouveau modele ; ses touches et options y sont passees (plus d'ajustement en double)
+    phone.button_template_id = t.id
+    phone.extra_config = None
     for b in buttons:
-        db.add(PhoneButtonTemplateItem(
-            template_id=t.id, position=b.position, page=b.page, button_type=b.button_type,
-            label=b.label, value=b.value, destination=b.destination,
-            sip_account_index=b.sip_account_index, client_editable=b.client_editable,
-            locked_by_simpleip=b.locked_by_simpleip,
-        ))
+        await db.delete(b)
     await db.commit()
-    result = await db.execute(select(PhoneButtonTemplate).options(selectinload(PhoneButtonTemplate.items)).where(PhoneButtonTemplate.id == t.id))
-    return _template_out(result.scalar_one())
+    return await _template_out(db, await _load_template(db, t.id))
 
 
-@router.post("/button-templates/{template_id}/apply/{phone_id}", response_model=list[PhoneButtonOut])
-async def apply_button_template(template_id: uuid.UUID, phone_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
-    """
-    Applique un template a un telephone -- REMPLACE les boutons existants de cet
-    appareil par ceux du template (semantique "appliquer" simple et predictible,
-    pas une fusion).
-    """
-    result = await db.execute(select(PhoneButtonTemplate).options(selectinload(PhoneButtonTemplate.items)).where(PhoneButtonTemplate.id == template_id))
-    t = result.scalar_one_or_none()
-    if not t:
-        raise HTTPException(status_code=404, detail="Template introuvable")
+@router.get("/{phone_id}/button-templates", response_model=list[ButtonTemplateOut])
+async def list_phone_button_templates(phone_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    """Modeles qu'un poste peut choisir : ceux de sa compagnie pour son modele de telephone."""
     phone = await db.get(ProvisionedPhone, phone_id)
     if not phone:
         raise HTTPException(status_code=404, detail="Téléphone introuvable")
+    q = (select(PhoneButtonTemplate).options(selectinload(PhoneButtonTemplate.items))
+         .where(PhoneButtonTemplate.tenant_id == phone.tenant_id, PhoneButtonTemplate.phone_model_id == phone.phone_model_id)
+         .order_by(PhoneButtonTemplate.name))
+    return [await _template_out(db, t) for t in (await db.execute(q)).scalars().all()]
 
-    existing = await db.execute(select(PhoneButton).where(PhoneButton.provisioned_phone_id == phone_id))
-    for b in existing.scalars().all():
-        await db.delete(b)
-    await db.flush()
 
-    new_buttons = []
-    for item in t.items:
-        b = PhoneButton(
-            provisioned_phone_id=phone_id, position=item.position, page=item.page,
-            button_type=item.button_type, label=item.label, value=item.value,
-            destination=item.destination, sip_account_index=item.sip_account_index,
-            client_editable=item.client_editable, locked_by_simpleip=item.locked_by_simpleip,
-        )
-        db.add(b)
-        new_buttons.append(b)
+@router.put("/{phone_id}/button-template", response_model=PhoneOut)
+async def set_phone_button_template(phone_id: uuid.UUID, payload: PhoneTemplateLink, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    """Choisit le modele de provisionnement du poste (ceux de sa compagnie, pour son modele de telephone) ; aucun = ses
+    propres touches. S'applique au prochain chargement de configuration du telephone."""
+    phone = await db.get(ProvisionedPhone, phone_id)
+    if not phone:
+        raise HTTPException(status_code=404, detail="Téléphone introuvable")
+    if payload.button_template_id:
+        t = await db.get(PhoneButtonTemplate, payload.button_template_id)
+        if not t or t.tenant_id != phone.tenant_id:
+            raise HTTPException(status_code=404, detail="Modèle introuvable pour cette compagnie")
+        if t.phone_model_id != phone.phone_model_id:
+            raise HTTPException(status_code=422, detail="Ce modèle est pour un autre modèle de téléphone")
+    phone.button_template_id = payload.button_template_id
     await db.commit()
-    for b in new_buttons:
-        await db.refresh(b)
-    return [_button_out(b) for b in new_buttons]
+    await db.refresh(phone)
+    return _phone_out(phone)
 
 
 # ── Tenant-Model Templates -- chaine d'heritage a 5 niveaux (TASK-S044) ──
