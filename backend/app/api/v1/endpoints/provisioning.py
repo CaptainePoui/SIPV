@@ -336,6 +336,12 @@ async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_d
         bt = await db.execute(select(PhoneButtonTemplate).options(selectinload(PhoneButtonTemplate.items))
                               .where(PhoneButtonTemplate.id == phone.button_template_id))
         btn_template = bt.scalar_one_or_none()
+    elif phone.phone_model_id:   # « Modele par defaut » (comme l'UCM) : un poste sans modele choisi prend celui-ci
+        bt = await db.execute(select(PhoneButtonTemplate).options(selectinload(PhoneButtonTemplate.items))
+                              .where(PhoneButtonTemplate.tenant_id == phone.tenant_id,
+                                     PhoneButtonTemplate.phone_model_id == phone.phone_model_id,
+                                     PhoneButtonTemplate.is_default == True))
+        btn_template = bt.scalars().first()
 
     ext = None
     tenant = None
@@ -555,6 +561,7 @@ class ButtonTemplateOut(BaseModel):
     options: dict | None
     softkeys: dict | None
     wallpaper_id: uuid.UUID | None = None
+    is_default: bool = False
     phones: int                     # postes qui l'utilisent
     created_at: datetime
     items: list[ButtonTemplateItemOut] = []
@@ -566,6 +573,7 @@ class ButtonTemplateIn(BaseModel):
     options: dict | None = None
     softkeys: dict | None = None
     wallpaper_id: uuid.UUID | None = None
+    is_default: bool = False
     items: list[ButtonTemplateItemIn] = []
 
 class SaveAsTemplatePayload(BaseModel):
@@ -582,7 +590,7 @@ async def _template_out(db: AsyncSession, t: PhoneButtonTemplate) -> ButtonTempl
         id=t.id, tenant_id=t.tenant_id, name=t.name, phone_model_id=t.phone_model_id,
         phone_model=model.model if model else None, pages=t.pages, options=t.options,
         softkeys={"layouts": normalize_layouts((t.softkeys or {}).get("layouts"))} if t.softkeys else None,
-        wallpaper_id=t.wallpaper_id, phones=len(used),
+        wallpaper_id=t.wallpaper_id, is_default=t.is_default, phones=len(used),
         created_at=t.created_at,
         items=[ButtonTemplateItemOut(id=i.id, position=i.position, page=i.page, button_type=i.button_type,
                                      label=i.label, value=i.value, sip_account_index=i.sip_account_index)
@@ -789,6 +797,14 @@ async def wallpaper_original(wallpaper_id: uuid.UUID, _: User | None = Depends(g
     return FileResponse(f)
 
 
+async def _one_default(db: AsyncSession, t: PhoneButtonTemplate, is_default: bool) -> None:
+    """Un seul « modele par defaut » par compagnie et par modele de telephone."""
+    if is_default:
+        await db.execute(update(PhoneButtonTemplate).where(PhoneButtonTemplate.tenant_id == t.tenant_id,
+                         PhoneButtonTemplate.phone_model_id == t.phone_model_id, PhoneButtonTemplate.id != t.id).values(is_default=False))
+    t.is_default = is_default
+
+
 @router.get("/key-catalog/{model_id}")
 async def get_key_catalog(model_id: uuid.UUID, tenant_id: uuid.UUID | None = None, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     """Touches, modes et boutons sous l'ecran offerts pour un modele de telephone (gabarit officiel)."""
@@ -830,6 +846,8 @@ async def create_button_template(tenant_id: uuid.UUID, payload: ButtonTemplateIn
                             wallpaper_id=payload.wallpaper_id, items=[])
     _set_items(t, payload.items)
     db.add(t)
+    await db.flush()
+    await _one_default(db, t, payload.is_default)
     await db.commit()
     return await _template_out(db, await _load_template(db, t.id))
 
@@ -845,6 +863,7 @@ async def update_button_template(template_id: uuid.UUID, payload: ButtonTemplate
     t.name, t.phone_model_id, t.pages, t.options, t.softkeys = (payload.name.strip(), payload.phone_model_id, payload.pages,
                                                                  payload.options, payload.softkeys)
     t.wallpaper_id = payload.wallpaper_id
+    await _one_default(db, t, payload.is_default)
     _set_items(t, payload.items)
     await db.commit()
     return await _template_out(db, await _load_template(db, template_id))

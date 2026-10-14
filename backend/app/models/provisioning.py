@@ -115,6 +115,7 @@ class PhoneButtonTemplate(Base):
     options: Mapped[dict | None] = mapped_column(JSON)                                           # options du telephone (langue...)
     softkeys: Mapped[dict | None] = mapped_column(JSON)                                          # boutons sous l'ecran
     wallpaper_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("wallpapers.id", ondelete="SET NULL"))  # 0081
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)  # 0082 : postes sans choix
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     items: Mapped[list["PhoneButtonTemplateItem"]] = relationship("PhoneButtonTemplateItem", back_populates="template", cascade="all, delete-orphan")
