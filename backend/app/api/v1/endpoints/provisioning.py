@@ -21,7 +21,7 @@ from app.models.server import SipvServer
 from app.models.user import User
 
 from app.api.v1.endpoints.internal_devices import internal_address
-from app.core.grandstream_keys import vpk_keys, merge_keys, key_catalog, softkey_items, GS_KEY_MODES
+from app.core.grandstream_keys import vpk_keys, merge_keys, key_catalog, softkey_items, normalize_layouts, GS_KEY_MODES
 
 router = APIRouter()
 
@@ -196,7 +196,7 @@ def _phone_out(p: ProvisionedPhone, reveal: bool = False) -> PhoneOut:
         provisioning_protocol=p.provisioning_protocol,
         selected_tenant_model_template_ids=p.selected_tenant_model_template_ids or [],
         button_template_id=p.button_template_id,
-        softkeys=p.softkeys,
+        softkeys={"layouts": normalize_layouts((p.softkeys or {}).get("layouts"))} if p.softkeys else None,
         provisioning_status="provisionne" if p.last_provisioned else "jamais",
     )
     if reveal:
@@ -370,8 +370,8 @@ async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_d
         # les ajustements du poste (meme place = remplace). Boutons sous l'ecran : seulement avec un modele (0073).
         "vpk_keys": vpk_keys(merge_keys(btn_template.items if btn_template else [], phone.buttons), model.model if model else None),
         # Boutons sous l'ecran : ceux du modele, puis les etats personnalises du poste (0075)
-        "softkey_items": softkey_items({"layouts": {**((btn_template.softkeys or {}).get("layouts") or {} if btn_template else {}),
-                                                    **((phone.softkeys or {}).get("layouts") or {})}})
+        "softkey_items": softkey_items({"layouts": {**normalize_layouts((btn_template.softkeys or {}).get("layouts") if btn_template else None),
+                                                    **normalize_layouts((phone.softkeys or {}).get("layouts"))}})
                          if btn_template or phone.softkeys else [],
         "config_host": f"{settings.SIPV_HOST}:8020",
         "provision_host": settings.SIPV_HOST,
@@ -563,7 +563,8 @@ async def _template_out(db: AsyncSession, t: PhoneButtonTemplate) -> ButtonTempl
     used = (await db.execute(select(ProvisionedPhone.id).where(ProvisionedPhone.button_template_id == t.id))).all()
     return ButtonTemplateOut(
         id=t.id, tenant_id=t.tenant_id, name=t.name, phone_model_id=t.phone_model_id,
-        phone_model=model.model if model else None, pages=t.pages, options=t.options, softkeys=t.softkeys, phones=len(used),
+        phone_model=model.model if model else None, pages=t.pages, options=t.options,
+        softkeys={"layouts": normalize_layouts((t.softkeys or {}).get("layouts"))} if t.softkeys else None, phones=len(used),
         created_at=t.created_at,
         items=[ButtonTemplateItemOut(id=i.id, position=i.position, page=i.page, button_type=i.button_type,
                                      label=i.label, value=i.value, sip_account_index=i.sip_account_index)

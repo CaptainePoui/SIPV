@@ -92,35 +92,43 @@ def merge_keys(template_items, phone_buttons) -> list:
     return list(by_index.values())
 
 
-# Boutons sous l'ecran (softkeys) : disposition par etat d'appel (« Custom Call Screen Softkey Layout »), gabarit « alias »
-# (noms au lieu de P-codes). Philippe (2026-10-14) : seulement les options des softkeys -- pas les touches programmables
-# de l'ecran au repos (pks.softkey / pks.scSoftkey), qui sont des touches ordinaires.
-# (nom de l'element, libelle, options possibles du gabarit, preference Simple IP = config de Philippe sur ses telephones)
+# Boutons sous l'ecran (softkeys) : disposition par etat d'appel (« Custom Softkey Layout »), en P-codes du gabarit
+# officiel (section « Settings/Programmable Keys / Softkeys Settings » : P2923 active la disposition, puis un P-code par
+# etat ; les options sont la liste « String: » de chaque etat). Philippe (2026-10-14) : seulement les options des softkeys.
+# (P-code, libelle, options possibles du gabarit, preference Simple IP = config de Philippe sur ses telephones)
+SOFTKEY_ENABLE_PCODE = 2923
 SOFTKEY_STATES = [
-    ("inDialing", "En composition",
-     "BTPhonebook,BTOnOff,EndCall,ReConf,ConfRoom,Redial,Dial,Backspace,PickUp,Target",
+    (2925, "En composition",
+     "BTPhonebook,BTOnOff,SpkOnOff,EndCall,ReConf,ConfRoom,Redial,Dial,Backspace,PickUp,Target,ShowHideLabel,Custom1,Custom2,Custom3",
      "EndCall,Redial,Dial,Backspace,Target"),
-    ("inOnhookDialing", "Composition sans décrocher",
-     "BTPhonebook,DirectIP,Onhook,Cancel,Dial,Backspace,Target",
+    (2935, "Composition sans décrocher",
+     "BTPhonebook,DirectIP,Onhook,Cancel,Dial,Backspace,Target,ShowHideLabel,Custom1,Custom2,Custom3",
      "Cancel,Dial,Backspace,Onhook,Target"),
-    ("InRinging", "Ça sonne", "Answer,Reject,Forward,ReConf,Custom-Silence", "Reject,Answer,Forward"),
-    ("inCalling", "Appel en cours de composition", "BTOnOff,Cancel,EndCall,ReConf,ConfRoom,ConfCall", "EndCall"),
-    ("inCallConnected", "En appel",
-     "BTPhonebook,BTOnOff,EndCall,ReConf,ConfRoom,Custom-Confcall,Cancel,NewCall,Swap,Transfer,Trnf>VM,DialDTMF,"
-     "BSCCenter,URecord,Record,UCallPark,PrivateHold,CallPark,Custom-Hold,Custom-Conference,Custom-Mute",
+    (2926, "Ça sonne", "Answer,Reject,Forward,ReConf,ShowHideLabel,Custom-Silence,Custom1,Custom2,Custom3", "Reject,Answer,Forward"),
+    (2927, "Appel en cours de composition",
+     "BTOnOff,SpkOnOff,Cancel,EndCall,ReConf,ConfRoom,ConfCall,ShowHideLabel,Custom1,Custom2,Custom3", "EndCall"),
+    (2928, "En appel",
+     "BTPhonebook,BTOnOff,SpkOnOff,EndCall,ReConf,ConfRoom,ConfCall,Cancel,NewCall,Swap,Transfer,Trnf>VM,DialDTMF,BSCCenter,"
+     "URecord,Record,UCallPark,PrivateHold,CallPark,ShowHideLabel,Custom-Hold,Custom-Conference,Custom-Mute,Custom1,Custom2,Custom3",
      "EndCall,NewCall,Transfer,Cancel,Swap,Record"),
-    ("inConferenceConnected", "En conférence",
-     "BTOnOff,EndCall,Kick,NewCall,Trnf>VM,DialDTMF,BSCCenter,URecord,Record,ConfRoom,Add,Custom-Hold,Custom-Split,Custom-Mute",
+    (2933, "En conférence",
+     "BTOnOff,SpkOnOff,EndCall,Kick,NewCall,Trnf>VM,DialDTMF,BSCCenter,URecord,Record,ConfRoom,Add,ShowHideLabel,Custom-Hold,"
+     "Custom-Split,Custom-Mute,Custom1,Custom2,Custom3",
      "EndCall,NewCall,Record"),
-    ("inOnhold", "En garde", "ReConf,Resume,HoldTrnf,ConfCall,Add,Custom-NewCall,Custom-EndCall",
+    (2929, "En garde", "ReConf,Resume,HoldTrnf,ConfCall,Add,ShowHideLabel,Custom-NewCall,Custom-EndCall,Custom1,Custom2,Custom3",
      "Custom-EndCall,Custom-NewCall,Resume,Add"),
-    ("inCallFailed", "Appel échoué", "EndCall,ReConf,ConfRoom,Custom-NewCall", "EndCall,Custom-NewCall"),
-    ("inTransfer", "En transfert", "BTOnOff,Cancel,BlindTrnf,AttTrnf,Backspace,Target",
+    (2930, "Appel échoué", "SpkOnOff,EndCall,ReConf,ConfRoom,ShowHideLabel,Custom-NewCall,Custom1,Custom2,Custom3",
+     "EndCall,Custom-NewCall"),
+    (2931, "En transfert", "BTOnOff,SpkOnOff,Cancel,BlindTrnf,AttTrnf,Backspace,Target,ShowHideLabel,Custom1,Custom2,Custom3",
      "Cancel,BlindTrnf,AttTrnf,Backspace,Target"),
-    ("inConference", "Ajout à une conférence", "BTOnOff,Cancel,Dial,Backspace,Target", "Cancel,Dial,Backspace,Target"),
+    (2932, "Ajout à une conférence", "BTOnOff,SpkOnOff,Cancel,Dial,Backspace,Target,ShowHideLabel,Custom1,Custom2,Custom3",
+     "Cancel,Dial,Backspace,Target"),
 ]
+# Anciennes cles (noms « alias » du 2026-10-14 matin) -> P-code : les dispositions deja enregistrees restent valables
+SOFTKEY_ALIAS = {"inDialing": 2925, "inOnhookDialing": 2935, "InRinging": 2926, "inCalling": 2927, "inCallConnected": 2928,
+                 "inConferenceConnected": 2933, "inOnhold": 2929, "inCallFailed": 2930, "inTransfer": 2931, "inConference": 2932}
 # Libelles affiches (comme la page web du telephone) ; les autres s'affichent tels quels
-SOFTKEY_LABELS = {"BTPhonebook": "Phonebook (BT)", "BTOnOff": "BT On/Off"}
+SOFTKEY_LABELS = {"BTPhonebook": "Phonebook (BT)", "BTOnOff": "BT On/Off", "SpkOnOff": "Spk On/Off"}
 
 
 def key_catalog(model_name: str | None) -> dict | None:
@@ -136,16 +144,25 @@ def key_catalog(model_name: str | None) -> dict | None:
         "modes": [{"key": k, "label": l, "fixed_only": k in FIXED_ONLY_MODES} for k, l in GS_KEY_MODE_LABELS],
         "softkeys": {
             "labels": SOFTKEY_LABELS,
-            "states": [{"key": k, "label": l, "options": o.split(","), "default": d.split(",")} for k, l, o, d in SOFTKEY_STATES],
+            "states": [{"key": f"P{k}", "label": l, "options": o.split(","), "default": d.split(",")} for k, l, o, d in SOFTKEY_STATES],
         },
     }
 
 
-def softkey_items(softkeys: dict | None) -> list[tuple[str, str]]:
-    """Elements « alias » des boutons sous l'ecran d'un modele de provisionnement : la disposition de chaque etat d'appel
-    (non definie = preference Simple IP). Tout est envoye pour que le telephone ne garde pas d'anciens reglages."""
-    layouts = (softkeys or {}).get("layouts") or {}
-    out: list[tuple[str, str]] = [("softkeys.layout.enable", "Yes")]
+def _layout_key(k: str) -> str:
+    return f"P{SOFTKEY_ALIAS[k]}" if k in SOFTKEY_ALIAS else k
+
+
+def normalize_layouts(layouts: dict | None) -> dict:
+    """Dispositions par etat, cles = « P2925 »... (accepte les anciennes cles « alias »)."""
+    return {_layout_key(k): v for k, v in (layouts or {}).items()}
+
+
+def softkey_items(softkeys: dict | None) -> list[tuple[int, str]]:
+    """P-codes des boutons sous l'ecran : disposition activee (P2923=1) et la liste de chaque etat (non definie =
+    preference Simple IP). Tout est envoye pour que le telephone ne garde pas d'anciens reglages."""
+    layouts = normalize_layouts((softkeys or {}).get("layouts"))
+    out: list[tuple[int, str]] = [(SOFTKEY_ENABLE_PCODE, "1")]
     for k, _, _, d in SOFTKEY_STATES:
-        out.append((f"softkeys.layout.state.{k}", ",".join(layouts.get(k) or d.split(","))))
+        out.append((k, ",".join(layouts.get(f"P{k}") or d.split(","))))
     return out
