@@ -1,3 +1,4 @@
+import re
 import uuid
 import base64
 import hashlib
@@ -21,6 +22,7 @@ from app.models.server import SipvServer
 from app.models.user import User
 
 from app.api.v1.endpoints.internal_devices import internal_address
+from app.core.gs_catalog import option_catalog, to_pcodes, managed_in, MANAGED
 from app.core.grandstream_keys import vpk_keys, merge_keys, key_catalog, softkey_items, normalize_layouts, GS_KEY_MODES
 
 router = APIRouter()
@@ -353,6 +355,11 @@ async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_d
         options.update(btn_template.options)
     if phone.extra_config:
         options.update(phone.extra_config)
+    pcodes = {**to_pcodes(await default_phone_options(db, server)),
+              **to_pcodes(btn_template.options if btn_template else None), **to_pcodes(phone.extra_config)}
+    named = {"P" + x for x in re.findall(r"<P(\d+)>", template_text)}
+    extra_pcodes = [(k[1:], v) for k, v in sorted(pcodes.items(), key=lambda kv: int(kv[0][1:]))
+                    if k not in named and k not in MANAGED]
 
     context: dict[str, Any] = {
         "phone": phone,
@@ -365,6 +372,9 @@ async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_d
         "server": server,
         "mac": phone.mac_address.replace(":", "").lower(),
         "options": options,
+        # Options en P-codes (TASK-051, 2026-10-14) : lues par le gabarit avec repli Simple IP, et ajoutees a la fin
+        "pcodes": pcodes,
+        "extra_pcodes": extra_pcodes,
         "buttons": sorted(phone.buttons, key=lambda b: (b.page, b.position)),
         # Touches a leurs vrais codes Grandstream, par modele (0072) : celles du modele de provisionnement du poste, puis
         # les ajustements du poste (meme place = remplace). Boutons sous l'ecran : seulement avec un modele (0073).
@@ -587,6 +597,9 @@ async def _check_template(db: AsyncSession, payload: ButtonTemplateIn) -> None:
     cat = key_catalog(model.model if model else None)
     if not cat:
         raise HTTPException(status_code=422, detail="Ce modèle de téléphone n'a pas encore de disposition de touches")
+    bad = managed_in(payload.options)
+    if bad:
+        raise HTTPException(status_code=422, detail=f"Réglé par SIPV, pas dans un modèle : {', '.join(bad)}")
     if not 1 <= payload.pages <= cat["pages"]:
         raise HTTPException(status_code=422, detail=f"Ce téléphone a au plus {cat['pages']} pages")
     seen = set()
@@ -623,6 +636,15 @@ async def get_key_catalog(model_id: uuid.UUID, tenant_id: uuid.UUID | None = Non
         server = await db.get(SipvServer, tenant.server_id) if tenant and tenant.server_id else None
     return {"model": model.model, "brand": model.brand, "catalog": key_catalog(model.model),
             "default_options": await default_phone_options(db, server)}
+
+
+@router.get("/option-catalog/{model_id}")
+async def get_option_catalog(model_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    """Arbre des options du telephone (sections -> options), tire du gabarit officiel ; null si le modele n'en a pas."""
+    model = await db.get(PhoneModel, model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail="Modèle de téléphone introuvable")
+    return {"model": model.model, "brand": model.brand, "catalog": option_catalog(model.model)}
 
 
 @router.get("/button-templates/tenant/{tenant_id}", response_model=list[ButtonTemplateOut])
@@ -742,6 +764,9 @@ async def save_phone_provisioning(phone_id: uuid.UUID, payload: PhoneProvisionin
     for i in payload.buttons:
         db.add(PhoneButton(provisioned_phone_id=phone_id, position=i.position, page=i.page, button_type=i.button_type,
                            label=i.label or None, value=i.value or None, sip_account_index=i.sip_account_index))
+    bad = managed_in(payload.extra_config)
+    if bad:
+        raise HTTPException(status_code=422, detail=f"Réglé par SIPV, pas dans un poste : {', '.join(bad)}")
     phone.extra_config = payload.extra_config or None
     phone.softkeys = payload.softkeys if (payload.softkeys or {}).get("layouts") else None
     await db.commit()
