@@ -48,6 +48,7 @@ class ProvisionedPhone(Base):
     # Modele de provisionnement choisi pour ce poste (TASK-051, 2026-10-14) : lien, pas copie -- le modele change, le poste suit
     button_template_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("phone_button_templates.id", ondelete="SET NULL"))
     softkeys: Mapped[dict | None] = mapped_column(JSON)    # boutons sous l'ecran personnalises pour ce poste (0075)
+    wallpaper_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("wallpapers.id", ondelete="SET NULL"))  # fond d'ecran du poste (0081)
     selected_tenant_model_template_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list, server_default="{}")
 
     # --- TASK-S011.2 : fiche physique du poste ---
@@ -113,6 +114,7 @@ class PhoneButtonTemplate(Base):
     pages: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)   # pages affichees (ajoutees)
     options: Mapped[dict | None] = mapped_column(JSON)                                           # options du telephone (langue...)
     softkeys: Mapped[dict | None] = mapped_column(JSON)                                          # boutons sous l'ecran
+    wallpaper_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("wallpapers.id", ondelete="SET NULL"))  # 0081
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     items: Mapped[list["PhoneButtonTemplateItem"]] = relationship("PhoneButtonTemplateItem", back_populates="template", cascade="all, delete-orphan")
@@ -203,3 +205,23 @@ class TenantModelTemplate(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class Wallpaper(Base):
+    """Fond d'ecran des telephones (TASK-051, 2026-10-14, Philippe : « je veux les fonds d'ecran dans le provisioning, lies
+    aux compagnies ; Global = mes telephones arrivent avec ca »). Lie par numero de compte (identite commune ERPCRM/SIPV,
+    meme avant que la compagnie ait son tenant) ; vide = Global Simple IP. Une image par resolution d'ecran ; l'original et
+    le cadrage sont gardes pour pouvoir refaire le cadrage. Fichiers dans /var/lib/sipv/wallpapers."""
+    __tablename__ = "wallpapers"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    account_number: Mapped[str | None] = mapped_column(String(20), index=True)      # None = Global
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    resolution: Mapped[str] = mapped_column(String(12), nullable=False)             # « 320x240 », « 480x272 »
+    mode: Mapped[str] = mapped_column(String(10), default="crop", server_default="crop", nullable=False)   # fit | crop
+    crop: Mapped[dict | None] = mapped_column(JSON)                                 # cadrage (position, zoom, couleur)
+    original_name: Mapped[str | None] = mapped_column(String(200))
+    has_original: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)  # par compte et resolution
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

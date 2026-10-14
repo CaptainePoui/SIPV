@@ -48,3 +48,11 @@ def to_pcodes(options: dict | None) -> dict:
 
 def managed_in(options: dict | None) -> list[str]:
     return sorted(k for k in to_pcodes(options) if k in MANAGED)
+
+
+# Resolution d'ecran par modele (guide d'administration GXP21xx, tableau « LCD Display ») -- pour le fond d'ecran
+SCREEN = {"GXP2130": "320x240", "GXP2135": "320x240", "GXP2140": "480x272", "GXP2160": "480x272", "GXP2170": "480x272"}
+
+
+def screen_of(model_name: str | None) -> str | None:
+    return SCREEN.get((model_name or "").upper())

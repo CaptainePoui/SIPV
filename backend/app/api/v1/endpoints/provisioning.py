@@ -1,12 +1,14 @@
 import re
 import uuid
+from pathlib import Path
 import base64
 import hashlib
 from datetime import datetime, timezone
 from typing import Any
 from jinja2 import Environment, BaseLoader, TemplateError
 from cryptography.fernet import Fernet
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status, UploadFile, File, Form
+from fastapi.responses import FileResponse
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
@@ -15,14 +17,14 @@ from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.config import settings
 from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
-from app.models.provisioning import PhoneModel, ProvisionedPhone, PhoneButton, PhoneButtonTemplate, PhoneButtonTemplateItem, GlobalTemplate, TenantTemplate, TenantModelTemplate
+from app.models.provisioning import Wallpaper, PhoneModel, ProvisionedPhone, PhoneButton, PhoneButtonTemplate, PhoneButtonTemplateItem, GlobalTemplate, TenantTemplate, TenantModelTemplate
 from app.models.sip import SIPExtension
 from app.models.tenant import Tenant
 from app.models.server import SipvServer
 from app.models.user import User
 
 from app.api.v1.endpoints.internal_devices import internal_address
-from app.core.gs_catalog import option_catalog, to_pcodes, managed_in, MANAGED
+from app.core.gs_catalog import option_catalog, to_pcodes, managed_in, MANAGED, screen_of
 from app.core.grandstream_keys import vpk_keys, merge_keys, key_catalog, softkey_items, normalize_layouts, GS_KEY_MODES
 
 router = APIRouter()
@@ -138,6 +140,7 @@ class PhoneOut(BaseModel):
     provisioning_protocol: str
     selected_tenant_model_template_ids: list[uuid.UUID] = []  # TASK-S044.2
     button_template_id: uuid.UUID | None = None               # modele de provisionnement choisi (TASK-051)
+    wallpaper_id: uuid.UUID | None = None                     # fond d'ecran choisi pour ce poste (0081)
     softkeys: dict | None = None                              # boutons sous l'ecran personnalises (0075)
     # Calcule a la volee depuis last_provisioned, pas stocke (TASK-S011.2) -- "jamais" ou
     # "provisionne" (avec la date deja dans last_provisioned). Pas de palier "en retard" :
@@ -198,6 +201,7 @@ def _phone_out(p: ProvisionedPhone, reveal: bool = False) -> PhoneOut:
         provisioning_protocol=p.provisioning_protocol,
         selected_tenant_model_template_ids=p.selected_tenant_model_template_ids or [],
         button_template_id=p.button_template_id,
+        wallpaper_id=p.wallpaper_id,
         softkeys={"layouts": normalize_layouts((p.softkeys or {}).get("layouts"))} if p.softkeys else None,
         provisioning_status="provisionne" if p.last_provisioned else "jamais",
     )
@@ -375,6 +379,7 @@ async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_d
         # Options en P-codes (TASK-051, 2026-10-14) : lues par le gabarit avec repli Simple IP, et ajoutees a la fin
         "pcodes": pcodes,
         "extra_pcodes": extra_pcodes,
+        "wallpaper_url": await wallpaper_url_for(db, phone, btn_template, tenant, model.model if model else None),
         "buttons": sorted(phone.buttons, key=lambda b: (b.page, b.position)),
         # Touches a leurs vrais codes Grandstream, par modele (0072) : celles du modele de provisionnement du poste, puis
         # les ajustements du poste (meme place = remplace). Boutons sous l'ecran : seulement avec un modele (0073).
@@ -549,6 +554,7 @@ class ButtonTemplateOut(BaseModel):
     pages: int
     options: dict | None
     softkeys: dict | None
+    wallpaper_id: uuid.UUID | None = None
     phones: int                     # postes qui l'utilisent
     created_at: datetime
     items: list[ButtonTemplateItemOut] = []
@@ -559,6 +565,7 @@ class ButtonTemplateIn(BaseModel):
     pages: int = 1
     options: dict | None = None
     softkeys: dict | None = None
+    wallpaper_id: uuid.UUID | None = None
     items: list[ButtonTemplateItemIn] = []
 
 class SaveAsTemplatePayload(BaseModel):
@@ -574,7 +581,8 @@ async def _template_out(db: AsyncSession, t: PhoneButtonTemplate) -> ButtonTempl
     return ButtonTemplateOut(
         id=t.id, tenant_id=t.tenant_id, name=t.name, phone_model_id=t.phone_model_id,
         phone_model=model.model if model else None, pages=t.pages, options=t.options,
-        softkeys={"layouts": normalize_layouts((t.softkeys or {}).get("layouts"))} if t.softkeys else None, phones=len(used),
+        softkeys={"layouts": normalize_layouts((t.softkeys or {}).get("layouts"))} if t.softkeys else None,
+        wallpaper_id=t.wallpaper_id, phones=len(used),
         created_at=t.created_at,
         items=[ButtonTemplateItemOut(id=i.id, position=i.position, page=i.page, button_type=i.button_type,
                                      label=i.label, value=i.value, sip_account_index=i.sip_account_index)
@@ -624,6 +632,163 @@ def _set_items(t: PhoneButtonTemplate, items: list[ButtonTemplateItemIn]) -> Non
                for i in items if i.button_type != "none"]
 
 
+# ── Fonds d'ecran (TASK-051, 2026-10-14) ──────────────────────────────────────────────────────────────────────────
+WALLPAPER_DIR = Path("/var/lib/sipv/wallpapers")
+ORIGINALS_DIR = WALLPAPER_DIR / "originals"
+
+
+def _jpeg_size(data: bytes) -> tuple[int, int] | None:
+    """(largeur, hauteur) d'un JPEG, lue dans l'en-tete SOF (sans dependance)."""
+    if data[:2] != b"\xff\xd8":
+        return None
+    i = 2
+    while i + 9 < len(data):
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        marker = data[i + 1]
+        if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+            return int.from_bytes(data[i + 7:i + 9], "big"), int.from_bytes(data[i + 5:i + 7], "big")
+        i += 2 + int.from_bytes(data[i + 2:i + 4], "big")
+    return None
+
+
+def _wallpaper_out(w: Wallpaper) -> dict:
+    return {"id": str(w.id), "account_number": w.account_number, "name": w.name, "resolution": w.resolution, "mode": w.mode,
+            "crop": w.crop, "original_name": w.original_name, "has_original": w.has_original, "is_default": w.is_default,
+            "global": w.account_number is None, "url": f"/api/v1/provisioning/wallpapers/file/{w.id}.jpg",
+            "updated_at": w.updated_at.isoformat() if w.updated_at else None}
+
+
+async def wallpaper_url_for(db: AsyncSession, phone, btn_template, tenant, model_name: str | None) -> str | None:
+    res = screen_of(model_name)
+    if not res:
+        return None
+    for wid in (phone.wallpaper_id, btn_template.wallpaper_id if btn_template else None):
+        if wid:
+            w = await db.get(Wallpaper, wid)
+            if w and w.resolution == res:
+                return f"https://{settings.SIPV_HOST}/wallpaper/{w.id}.jpg"
+    for acct in ([tenant.account_number] if tenant else []) + [None]:
+        q = select(Wallpaper).where(Wallpaper.resolution == res, Wallpaper.is_default == True,
+                                    Wallpaper.account_number == acct if acct else Wallpaper.account_number.is_(None))
+        w = (await db.execute(q)).scalars().first()
+        if w:
+            return f"https://{settings.SIPV_HOST}/wallpaper/{w.id}.jpg"
+    return None
+
+
+async def _save_files(w: Wallpaper, file: UploadFile | None, original: UploadFile | None) -> None:
+    WALLPAPER_DIR.mkdir(parents=True, exist_ok=True)
+    ORIGINALS_DIR.mkdir(parents=True, exist_ok=True)
+    if file is not None:
+        data = await file.read()
+        size = _jpeg_size(data)
+        if not size:
+            raise HTTPException(status_code=422, detail="L'image envoyée doit être un JPEG")
+        if f"{size[0]}x{size[1]}" != w.resolution:
+            raise HTTPException(status_code=422, detail=f"L'image fait {size[0]}×{size[1]}, il faut {w.resolution.replace('x', '×')}")
+        (WALLPAPER_DIR / f"{w.id}.jpg").write_bytes(data)
+    if original is not None:
+        (ORIGINALS_DIR / str(w.id)).write_bytes(await original.read())
+        w.has_original = True
+        w.original_name = original.filename
+
+
+@router.get("/wallpapers")
+async def list_wallpapers(account: str | None = None, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    """Fonds d'ecran d'une compagnie (numero de compte) et les Global ; sans compte : les Global seulement."""
+    q = select(Wallpaper).where(Wallpaper.account_number.is_(None) | (Wallpaper.account_number == account) if account
+                                else Wallpaper.account_number.is_(None)).order_by(Wallpaper.account_number.nulls_last(), Wallpaper.resolution, Wallpaper.name)
+    return [_wallpaper_out(w) for w in (await db.execute(q)).scalars().all()]
+
+
+@router.post("/wallpapers", status_code=status.HTTP_201_CREATED)
+async def create_wallpaper(name: str = Form(...), resolution: str = Form(...), account_number: str | None = Form(None),
+                           mode: str = Form("crop"), crop: str | None = Form(None), file: UploadFile = File(...),
+                           original: UploadFile | None = File(None), db: AsyncSession = Depends(get_db),
+                           _: User | None = Depends(get_current_user_or_service)):
+    import json as _json
+    if not re.match(r"^\d{2,4}x\d{2,4}$", resolution):
+        raise HTTPException(status_code=422, detail="Résolution invalide")
+    w = Wallpaper(name=name.strip(), resolution=resolution, account_number=(account_number or None), mode=mode,
+                  crop=_json.loads(crop) if crop else None)
+    first = (await db.execute(select(Wallpaper.id).where(Wallpaper.resolution == resolution,
+             Wallpaper.account_number == w.account_number if w.account_number else Wallpaper.account_number.is_(None)))).first()
+    w.is_default = first is None                     # le premier d'une compagnie (ou du Global) pour cette resolution
+    db.add(w)
+    await db.flush()
+    await _save_files(w, file, original)
+    await db.commit()
+    return _wallpaper_out(w)
+
+
+@router.put("/wallpapers/{wallpaper_id}")
+async def update_wallpaper(wallpaper_id: uuid.UUID, name: str | None = Form(None), mode: str | None = Form(None),
+                           crop: str | None = Form(None), file: UploadFile | None = File(None), original: UploadFile | None = File(None),
+                           db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    import json as _json
+    w = await db.get(Wallpaper, wallpaper_id)
+    if not w:
+        raise HTTPException(status_code=404, detail="Fond d'écran introuvable")
+    if name:
+        w.name = name.strip()
+    if mode:
+        w.mode = mode
+    if crop is not None:
+        w.crop = _json.loads(crop) if crop else None
+    await _save_files(w, file, original)
+    w.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    return _wallpaper_out(w)
+
+
+@router.put("/wallpapers/{wallpaper_id}/default")
+async def set_default_wallpaper(wallpaper_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    """Le fond par defaut de sa compagnie (ou du Global) pour sa resolution : les postes sans choix le prennent."""
+    w = await db.get(Wallpaper, wallpaper_id)
+    if not w:
+        raise HTTPException(status_code=404, detail="Fond d'écran introuvable")
+    await db.execute(update(Wallpaper).where(Wallpaper.resolution == w.resolution,
+                     Wallpaper.account_number == w.account_number if w.account_number else Wallpaper.account_number.is_(None))
+                     .values(is_default=False))
+    w.is_default = True
+    await db.commit()
+    return _wallpaper_out(w)
+
+
+@router.delete("/wallpapers/{wallpaper_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_wallpaper(wallpaper_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    w = await db.get(Wallpaper, wallpaper_id)
+    if not w:
+        raise HTTPException(status_code=404, detail="Fond d'écran introuvable")
+    used = (await db.execute(select(PhoneButtonTemplate.id).where(PhoneButtonTemplate.wallpaper_id == w.id))).first() or \
+        (await db.execute(select(ProvisionedPhone.id).where(ProvisionedPhone.wallpaper_id == w.id))).first()
+    if used:
+        raise HTTPException(status_code=422, detail="Ce fond d'écran est choisi dans un modèle ou un poste : retirez-le d'abord")
+    await db.delete(w)
+    await db.commit()
+    for f in (WALLPAPER_DIR / f"{wallpaper_id}.jpg", ORIGINALS_DIR / str(wallpaper_id)):
+        f.unlink(missing_ok=True)
+
+
+@router.get("/wallpapers/file/{wallpaper_id}.jpg")
+async def wallpaper_file(wallpaper_id: uuid.UUID):
+    """Image demandee par le telephone (P2917, sans authentification, comme la config) et par l'ecran (vignettes)."""
+    f = WALLPAPER_DIR / f"{wallpaper_id}.jpg"
+    if not f.exists():
+        raise HTTPException(status_code=404, detail="Image introuvable")
+    return FileResponse(f, media_type="image/jpeg", headers={"Cache-Control": "no-cache"})
+
+
+@router.get("/wallpapers/{wallpaper_id}/original")
+async def wallpaper_original(wallpaper_id: uuid.UUID, _: User | None = Depends(get_current_user_or_service)):
+    f = ORIGINALS_DIR / str(wallpaper_id)
+    if not f.exists():
+        raise HTTPException(status_code=404, detail="Pas d'original pour ce fond d'écran")
+    return FileResponse(f)
+
+
 @router.get("/key-catalog/{model_id}")
 async def get_key_catalog(model_id: uuid.UUID, tenant_id: uuid.UUID | None = None, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
     """Touches, modes et boutons sous l'ecran offerts pour un modele de telephone (gabarit officiel)."""
@@ -634,8 +799,8 @@ async def get_key_catalog(model_id: uuid.UUID, tenant_id: uuid.UUID | None = Non
     if tenant_id:
         tenant = await db.get(Tenant, tenant_id)
         server = await db.get(SipvServer, tenant.server_id) if tenant and tenant.server_id else None
-    return {"model": model.model, "brand": model.brand, "catalog": key_catalog(model.model),
-            "default_options": await default_phone_options(db, server)}
+    return {"model": model.model, "brand": model.brand, "catalog": key_catalog(model.model), "screen": screen_of(model.model),
+            "default_options": to_pcodes(await default_phone_options(db, server))}
 
 
 @router.get("/option-catalog/{model_id}")
@@ -661,7 +826,8 @@ async def create_button_template(tenant_id: uuid.UUID, payload: ButtonTemplateIn
         raise HTTPException(status_code=404, detail="Tenant introuvable")
     await _check_template(db, payload)
     t = PhoneButtonTemplate(tenant_id=tenant_id, name=payload.name.strip(), phone_model_id=payload.phone_model_id,
-                            pages=payload.pages, options=payload.options, softkeys=payload.softkeys, items=[])
+                            pages=payload.pages, options=payload.options, softkeys=payload.softkeys,
+                            wallpaper_id=payload.wallpaper_id, items=[])
     _set_items(t, payload.items)
     db.add(t)
     await db.commit()
@@ -678,6 +844,7 @@ async def update_button_template(template_id: uuid.UUID, payload: ButtonTemplate
             raise HTTPException(status_code=422, detail="Des postes utilisent ce modèle : on ne peut pas changer son modèle de téléphone")
     t.name, t.phone_model_id, t.pages, t.options, t.softkeys = (payload.name.strip(), payload.phone_model_id, payload.pages,
                                                                  payload.options, payload.softkeys)
+    t.wallpaper_id = payload.wallpaper_id
     _set_items(t, payload.items)
     await db.commit()
     return await _template_out(db, await _load_template(db, template_id))
@@ -742,6 +909,7 @@ async def list_phone_button_templates(phone_id: uuid.UUID, db: AsyncSession = De
 class PhoneProvisioningIn(BaseModel):
     extra_config: dict | None = None
     softkeys: dict | None = None
+    wallpaper_id: uuid.UUID | None = None
     buttons: list[ButtonTemplateItemIn] = []
 
 
@@ -769,6 +937,7 @@ async def save_phone_provisioning(phone_id: uuid.UUID, payload: PhoneProvisionin
         raise HTTPException(status_code=422, detail=f"Réglé par SIPV, pas dans un poste : {', '.join(bad)}")
     phone.extra_config = payload.extra_config or None
     phone.softkeys = payload.softkeys if (payload.softkeys or {}).get("layouts") else None
+    phone.wallpaper_id = payload.wallpaper_id
     await db.commit()
     await db.refresh(phone)
     return _phone_out(phone)
