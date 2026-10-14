@@ -8,7 +8,11 @@ Regles de Philippe :
 - chaque groupe (et ce qu'il contient) : deplacer, copier (les deux restent actifs : l'ancien sans les postes partis,
   le nouveau avec eux) ou laisser (les postes partis en sont retires) -- meme choix pour parcage, IVR, files,
   interphone, interception, horaires, messages enregistres, musique d'attente, trunks et routes, jours feries ;
-- l'adresse 911 suit le poste / le numero : ERPCRM fournit l'adresse 911 du tenant de destination (confirmee) ;
+- le poste / le numero garde son adresse 911 (Philippe, 2026-10-14 : « si le poste migre rien ne change ») ; l'adresse
+  passe au tenant d'arrivee quand plus rien ne l'utilise dans celui de depart, et toutes celles du tenant de depart y
+  passent quand il est vide (une succursale qui entre dans le tenant de sa maison mere) ;
+- tenant d'arrivee pas encore cree (maison mere sans telephonie) : l'apercu le traite comme un tenant vide
+  (dest_new_account_number) ; ERPCRM le cree juste avant l'execution ;
 - l'historique d'appels reste dans l'ancien tenant, marque (date de migration, tenant de destination).
 
 Toujours un apercu d'abord (preview) ; l'execution refait l'apercu, refuse s'il reste un conflit, copie la base,
@@ -85,6 +89,11 @@ async def _tenant(db: AsyncSession, tid) -> Tenant | None:
     return await db.get(Tenant, uuid.UUID(str(tid))) if tid else None
 
 
+def _new_tenant(account_number: str | None) -> Tenant | None:
+    """Tenant d'arrivee qui n'existe pas encore : vide, pour l'apercu seulement (jamais ajoute a la base)."""
+    return Tenant(id=uuid.uuid4(), account_number=account_number, company_name=account_number, is_active=True) if account_number else None
+
+
 async def inventory(db: AsyncSession, tenant_id) -> dict:
     """Tout ce que le tenant contient, pour l'ecran (cases a cocher et choix)."""
     t = await _tenant(db, tenant_id)
@@ -148,7 +157,8 @@ def _uuid(x):
 async def _plan(db: AsyncSession, sel: dict) -> dict:
     """Calcule tout ce que la migration fera. Retourne aussi les objets charges pour l'execution."""
     steps, conflicts, warnings = [], [], []
-    src, dst = await _tenant(db, sel.get("source_tenant_id")), await _tenant(db, sel.get("dest_tenant_id"))
+    src = await _tenant(db, sel.get("source_tenant_id"))
+    dst = await _tenant(db, sel.get("dest_tenant_id")) if sel.get("dest_tenant_id") else _new_tenant(sel.get("dest_new_account_number"))
     if not src or not dst:
         return {"steps": [], "conflicts": ["Tenant de départ ou d'arrivée introuvable."], "warnings": [], "ctx": None}
     if src.id == dst.id:
@@ -159,7 +169,6 @@ async def _plan(db: AsyncSession, sel: dict) -> dict:
     actions = {k: {_uuid(i): a for i, a in (sel.get("objects", {}).get(k) or {}).items()} for k in MODELS}
     ext_sel = {_uuid(e["id"]): (e.get("new_number") or "").strip() for e in sel.get("extensions", [])}
     did_ids = {_uuid(d) for d in sel.get("dids", [])}
-    e911_map = {k: _uuid(v) for k, v in (sel.get("e911") or {}).items() if v}
 
     exts = {e.id: e for e in (await db.execute(select(SIPExtension).where(SIPExtension.id.in_(ext_sel)))).scalars().all()}
     dids = {d.id: d for d in (await db.execute(select(TenantDID).where(TenantDID.id.in_(did_ids)))).scalars().all()}
@@ -263,26 +272,35 @@ async def _plan(db: AsyncSession, sel: dict) -> dict:
             if p and actions["prompts"].get(p.id, "leave") == "leave":
                 warnings.append(f"Numéro {d.number} : son message « {d.destination} » ne part pas (copiez-le).")
 
-    # 911
+    # 911 : chaque poste / numero garde son adresse ; l'adresse suit quand plus rien ne l'utilise dans le depart
     ext_911 = {a.extension_id: a for a in (await db.execute(select(ExtensionE911Assignment).where(ExtensionE911Assignment.extension_id.in_(exts)))).scalars().all()}
     did_911 = {a.did_id: a for a in (await db.execute(select(DID911Assignment).where(DID911Assignment.did_id.in_(dids)))).scalars().all()}
-    dst_addrs = {a.id: a for a in (await db.execute(select(E911Address).where(E911Address.tenant_id == dst.id))).scalars().all()}
-    for key, a in list(e911_map.items()):
-        if a not in dst_addrs:
-            conflicts.append("Une adresse 911 choisie n'est pas dans le tenant d'arrivée.")
-            e911_map.pop(key)
-    for eid, e in exts.items():
-        a = dst_addrs.get(e911_map.get(f"extension:{eid}"))
-        if a:
-            steps.append(f"  Poste {new_num[eid]} : adresse 911 {a.civic_number} {a.street_name}, {a.city}.")
-        elif eid in ext_911:
-            conflicts.append(f"Poste {e.extension} : choisissez son adresse 911 dans {dst.account_number}.")
-    for did_id, d in dids.items():
-        a = dst_addrs.get(e911_map.get(f"did:{did_id}"))
-        if a:
-            steps.append(f"  Numéro {d.number} : adresse 911 {a.civic_number} {a.street_name}, {a.city}.")
-        elif did_id in did_911:
-            conflicts.append(f"Numéro {d.number} : choisissez son adresse 911 dans {dst.account_number}.")
+    src_addrs = {a.id: a for a in (await db.execute(select(E911Address).where(E911Address.tenant_id == src.id))).scalars().all()}
+    all_exts = set((await db.execute(select(SIPExtension.id).where(SIPExtension.tenant_id == src.id))).scalars().all())
+    all_dids = set((await db.execute(select(TenantDID.id).where(TenantDID.tenant_id == src.id))).scalars().all())
+    source_emptied = bool(exts or dids) and all_exts <= set(exts) and all_dids <= set(dids)
+    if source_emptied:
+        move_addrs = set(src_addrs)
+    else:
+        still = {a.e911_address_id for a in (await db.execute(select(ExtensionE911Assignment).where(
+            ExtensionE911Assignment.extension_id.in_(all_exts - set(exts))))).scalars().all()}
+        still |= {a.e911_address_id for a in (await db.execute(select(DID911Assignment).where(
+            DID911Assignment.did_id.in_(all_dids - set(dids))))).scalars().all()}
+        move_addrs = {a.e911_address_id for a in (*ext_911.values(), *did_911.values())} - still
+    move_addrs &= set(src_addrs)
+    for eid, a in ext_911.items():
+        x = src_addrs.get(a.e911_address_id) or await db.get(E911Address, a.e911_address_id)
+        if x:
+            steps.append(f"  Poste {new_num[eid]} : garde son adresse 911 {x.civic_number} {x.street_name}, {x.city}.")
+    for did_id, a in did_911.items():
+        x = src_addrs.get(a.e911_address_id) or await db.get(E911Address, a.e911_address_id)
+        if x:
+            steps.append(f"  Numéro {dids[did_id].number} : garde son adresse 911 {x.civic_number} {x.street_name}, {x.city}.")
+    for aid in move_addrs:
+        x = src_addrs[aid]
+        steps.append(f"Adresse 911 « {x.label} » ({x.civic_number} {x.street_name}, {x.city}) → {dst.account_number}.")
+    if source_emptied:
+        steps.append(f"{src.account_number} n'a plus de poste ni de numéro : il sera désactivé (pas supprimé).")
 
     # Messages vocaux, telephones, sortie vers l'exterieur, historique
     vm = dict((await db.execute(select(VoicemailBox.extension_id, func.count(VoicemailMessage.id))
@@ -305,7 +323,7 @@ async def _plan(db: AsyncSession, sel: dict) -> dict:
         steps.append("Facturation : retrait dans l'ancienne compagnie, ajout dans la nouvelle (prorata).")
 
     ctx = {"src": src, "dst": dst, "exts": exts, "dids": dids, "new_num": new_num, "new_user": new_user, "actions": actions,
-           "loaded": loaded, "e911_map": e911_map, "dst_addrs": dst_addrs, "ext_911": ext_911, "did_911": did_911,
+           "loaded": loaded, "ext_911": ext_911, "did_911": did_911, "move_addrs": move_addrs, "source_emptied": source_emptied,
            "phones": phones, "moving_users": moving_users}
     return {"steps": steps, "conflicts": conflicts, "warnings": warnings, "ctx": ctx}
 
@@ -342,6 +360,8 @@ def _copy_file(folder: Path, filename: str) -> str:
 
 
 async def execute(db: AsyncSession, sel: dict) -> dict:
+    if not sel.get("dest_tenant_id"):
+        return {"ok": False, "conflicts": ["Le tenant d'arrivée doit être créé avant la migration."], "warnings": [], "steps": []}
     p = await _plan(db, sel)
     if p["conflicts"]:
         return {"ok": False, "conflicts": p["conflicts"], "warnings": p["warnings"], "steps": p["steps"]}
@@ -411,14 +431,7 @@ async def execute(db: AsyncSession, sel: dict) -> dict:
         e.preferred_trunk_id = remap("trunks", e.preferred_trunk_id)
         await db.execute(update(VoicemailBox).where(VoicemailBox.extension_id == eid).values(tenant_id=dst.id, mailbox=e.extension))
         await db.execute(update(ProvisionedPhone).where(ProvisionedPhone.extension_id == eid).values(tenant_id=dst.id))
-        old = c["ext_911"].get(eid)
-        await db.execute(delete(ExtensionE911Assignment).where(ExtensionE911Assignment.extension_id == eid))
-        addr = c["e911_map"].get(f"extension:{eid}")
-        if addr:
-            db.add(ExtensionE911Assignment(tenant_id=dst.id, extension_id=eid, e911_address_id=addr,
-                                           emergency_location=old.emergency_location if old else None,
-                                           floor=old.floor if old else None, office=old.office if old else None,
-                                           alert_email=old.alert_email if old else None))
+        await db.execute(update(ExtensionE911Assignment).where(ExtensionE911Assignment.extension_id == eid).values(tenant_id=dst.id))
     await db.flush()
 
     # 3. Groupes, files, interphone, interception, parcage, IVR
@@ -527,11 +540,11 @@ async def execute(db: AsyncSession, sel: dict) -> dict:
                 if d.destination == num:
                     d.destination = c["new_num"][eid]
         await db.execute(update(InboundRoute).where(InboundRoute.did_id == did_id).values(tenant_id=dst.id))
-        await db.execute(delete(DID911Assignment).where(DID911Assignment.did_id == did_id))
-        addr = c["e911_map"].get(f"did:{did_id}")
-        if addr:
-            old = c["did_911"].get(did_id)
-            db.add(DID911Assignment(tenant_id=dst.id, did_id=did_id, e911_address_id=addr, alert_email=old.alert_email if old else None))
+        await db.execute(update(DID911Assignment).where(DID911Assignment.did_id == did_id).values(tenant_id=dst.id))
+    for aid in c["move_addrs"]:
+        await db.execute(update(E911Address).where(E911Address.id == aid).values(tenant_id=dst.id))
+    if c["source_emptied"]:
+        src.is_active = False
 
     # 5. Historique d'appels : garde, marque
     marks = []
@@ -556,6 +569,7 @@ async def execute(db: AsyncSession, sel: dict) -> dict:
                                  for eid in exts],
             "moved_dids": [{"id": str(i), "number": d.number, "erpcrm_did_id": str(d.erpcrm_did_id) if d.erpcrm_did_id else None}
                            for i, d in dids.items()],
+            "moved_addresses": [str(a) for a in c["move_addrs"]], "source_emptied": c["source_emptied"],
             "source": {"id": str(src.id), "account_number": src.account_number},
             "dest": {"id": str(dst.id), "account_number": dst.account_number},
             "moh_changed": any(a in ("move", "copy") for a in actions["moh"].values())}

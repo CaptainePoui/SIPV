@@ -20,11 +20,11 @@ log = logging.getLogger("migration")
 
 class Selection(BaseModel):
     source_tenant_id: uuid.UUID
-    dest_tenant_id: uuid.UUID
+    dest_tenant_id: uuid.UUID | None = None
+    dest_new_account_number: str | None = None   # apercu vers un tenant pas encore cree (ERPCRM le cree avant d'executer)
     extensions: list[dict] = []        # [{"id": ..., "new_number": "..."}]
     dids: list[uuid.UUID] = []
     objects: dict[str, dict[str, str]] = {}   # {"ring_groups": {"<id>": "move|copy|leave"}, ...}
-    e911: dict[str, uuid.UUID | None] = {}    # {"extension:<id>": e911_address_id, "did:<id>": ...}
 
 
 def _sel(s: Selection) -> dict:
