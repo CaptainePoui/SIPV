@@ -73,6 +73,21 @@ def _send_to_kamailio(contact: str, identity: str, user: str, password: str, key
         sock.close()
 
 
+async def factory_reset_phones(username: str, password: str) -> int:
+    """Remise a zero du telephone (2026-10-14) : NOTIFY « Event: reset » authentifie, accepte seulement si la config du
+    telephone a « Allow SIP Reset » = Oui (P26015=1, 0078). Pas de repli FreeSWITCH. Le telephone oublie ensuite aussi son
+    serveur de config (il faut le reprovisionner sur place, sauf option DHCP 66)."""
+    regs = await registrations(username)
+    key = _ctrl_key()
+    if not key:
+        raise RuntimeError("clé Kamailio absente")
+    for r in regs:
+        ok = await asyncio.to_thread(_send_to_kamailio, r["contact"], f"sip:{username}@{r['realm']}", username, password, key, "reset")
+        if not ok:
+            raise RuntimeError("Kamailio n'a pas accepté l'ordre")
+    return len(regs)
+
+
 async def reboot_phones(username: str, password: str | None = None, reboot: bool = True) -> int:
     """Nombre d'enregistrements a qui l'ordre a ete envoye (0 = aucun telephone enregistre). reboot=False : « Pousser la
     config » (Philippe, 2026-10-14) -- le telephone relit sa configuration sans redemarrer (check-sync;reboot=false)."""

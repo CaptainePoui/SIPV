@@ -845,3 +845,21 @@ async def push_extension_config(ext_id: uuid.UUID, db: AsyncSession = Depends(ge
     if not n:
         raise HTTPException(status_code=409, detail=f"Aucun téléphone enregistré sous {ext.username}")
     return {"pushed": n, "username": ext.username}
+
+
+@router.post("/{ext_id}/factory-reset")
+async def factory_reset_extension_phones(ext_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    """Bouton « Remise a zero » d ERPCRM (2026-10-14), avec popup Attention cote ecran : remet le telephone du poste aux
+    reglages d usine (NOTIFY Event: reset authentifie ; il faut que le telephone ait deja pris une config avec P26015=1)."""
+    ext = await db.get(SIPExtension, ext_id)
+    if not ext:
+        raise HTTPException(status_code=404, detail="Poste introuvable")
+    from app.core.phone_reboot import factory_reset_phones
+    try:
+        from app.core.crypto import decrypt
+        n = await factory_reset_phones(ext.username, decrypt(ext.password))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Ordre non envoyé : {e}")
+    if not n:
+        raise HTTPException(status_code=409, detail=f"Aucun téléphone enregistré sous {ext.username}")
+    return {"reset": n, "username": ext.username}
