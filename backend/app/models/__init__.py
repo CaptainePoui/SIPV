@@ -16,7 +16,7 @@ from app.models.webhook import WebhookEndpoint, WebhookDelivery
 from app.models.schedule import Schedule, ScheduleRule, Holiday
 from app.models.audit_log import AuditLog
 from app.models.settings import TelephonySettings
-from app.models.server import SipvServer
+from app.models.server import SipvServer, InternalNetworkTenant
 from app.models.prompt import AudioPrompt
 from app.models.moh import MohFile, TenantMohSelection
 from app.models.backup import CloudBackupConnection, BackupCycle, BackupRunLog

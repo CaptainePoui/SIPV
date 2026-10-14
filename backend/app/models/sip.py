@@ -98,6 +98,10 @@ class SIPExtension(Base):
     record_internal_outgoing: Mapped[bool] = mapped_column(Boolean, default=False)
     record_external_incoming: Mapped[bool] = mapped_column(Boolean, default=False)
     record_external_outgoing: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Appareil interne (TASK-027.3, 2026-10-11) : poste branche sur le meme reseau que son serveur (bureau) -- son
+    # telephone recoit l'adresse interne du serveur comme proxy SIP (P48) au lieu de l'adresse publique (la boucle NAT
+    # du routeur ne tient pas). Coche dans ERPCRM, Serveur -> Appareils internes.
+    internal_network: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
 
     # --- TASK-S007.2 : pickup/paging/interception (concept poste, pas file d'attente) ---
     pickup_group: Mapped[str | None] = mapped_column(String(50))

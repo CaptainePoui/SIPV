@@ -41,6 +41,13 @@ async def registrations(username: str) -> list[dict]:
     return out
 
 
+async def registered_users() -> set[str]:
+    """Identifiants SIP enregistres en ce moment (une seule lecture, pour une liste de postes)."""
+    esl = await get_esl()
+    text = await esl.api("sofia status profile internal reg")
+    return {l.strip().split()[-1].partition("@")[0] for l in text.splitlines() if l.strip().startswith("User:")}
+
+
 async def registered_realms(username: str) -> set[str]:
     return {r["realm"] for r in await registrations(username)}
 

@@ -19,6 +19,8 @@ from app.models.sip import SIPExtension
 from app.models.tenant import Tenant
 from app.models.user import User
 
+from app.api.v1.endpoints.internal_devices import internal_address
+
 router = APIRouter()
 
 # Fernet key derive de SECRET_KEY -- meme pattern que ClientAccess cote ERPCRM,
@@ -414,7 +416,9 @@ async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_d
         "button_mode": BUTTON_TYPE_TO_GS_MODE,
         "config_host": f"{settings.SIPV_HOST}:8020",
         "provision_host": settings.SIPV_HOST,
-        "sip_proxy_host": settings.SIPV_PUBLIC_IP,   # P48 : adresse publique (bureau et exterieur, 0069)   # P237 : le telephone demande /cfg<mac> au serveur web (0068)
+        # P48 (proxy SIP) : adresse publique (0069), sauf poste coche « Interne » -> adresse interne de son serveur
+        # (TASK-027.3). P237 : le telephone demande /cfg<mac> au serveur web (0068).
+        "sip_proxy_host": internal_address(server) if ext and ext.internal_network else settings.SIPV_PUBLIC_IP,
     }
 
     try:

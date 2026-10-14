@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Boolean, DateTime, Text
+from sqlalchemy import String, Boolean, DateTime, Text, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from app.core.database import Base
@@ -28,4 +28,17 @@ class SipvServer(Base):
     sip_outbound_ip: Mapped[str | None] = mapped_column(String(45))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class InternalNetworkTenant(Base):
+    """Tenant ajoute dans Serveur -> Appareils internes (TASK-027.3, 2026-10-11) : sa section montre tous ses postes avec
+    une case « Interne ». Par serveur (chaque serveur a ses appareils internes et sa propre adresse interne). Plusieurs
+    tenants possibles : plusieurs entreprises sur le meme Internet que le serveur."""
+    __tablename__ = "internal_network_tenants"
+    __table_args__ = (UniqueConstraint("server_id", "tenant_id", name="uq_internal_network_tenant"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    server_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sipv_servers.id", ondelete="CASCADE"), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
