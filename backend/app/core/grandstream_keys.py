@@ -12,6 +12,7 @@ Seule source : gabarits officiels du firmware 1.0.11.106 fournis par Philippe
 # (page 1) ; les dynamiques forment les pages suivantes, 8 par page sur l'ecran.
 GS_VPK_LAYOUT = {"GXP2130": (3, 12), "GXP2140": (4, 16), "GXP2160": (6, 24), "GXP2135": (8, 32), "GXP2170": (12, 48)}
 VPK_KEYS_PER_PAGE = 8
+SPARE_LINE_ACCOUNT = 1      # « Account 2 » (0 = compte 1) : jamais configure par SIPV, sert aux touches Ligne suivantes
 
 # Modes, legende des touches fixes du gabarit. Une touche dynamique prend le meme code moins 10 (legende « Dynamic VPK »)
 # et n'accepte ni Ligne ni Ligne partagee. (L'ancienne table appliquait la legende fixe aux touches dynamiques :
@@ -56,15 +57,25 @@ def vpk_keys(buttons, model_name: str | None) -> list[dict]:
     fixed, total = GS_VPK_LAYOUT.get((model_name or "").upper(), (0, 0))
     by_index = {(b.page or 0) * VPK_KEYS_PER_PAGE + b.position: b for b in buttons}
     out = []
+    first_line = False
     for n in range(1, total + 1):
         b = by_index.get(n)
         mode = GS_KEY_MODES.get(b.button_type, -1) if b else -1
         if n > fixed and mode != -1:
             mode = mode - 10 if mode >= 10 else -1          # Ligne / Ligne partagee impossibles sur une touche dynamique
+        account = (b.sip_account_index - 1) if b and mode != -1 else 0
+        label = (b.label or "") if b and mode != -1 else ""
+        # Regle (Philippe, 2026-10-14, prouvee sur le 102 d'apres son GXP2170 de l'UCM) : en Line Mode (P8369=1), la
+        # 1re touche Ligne du compte 1 garde son nom ; les suivantes pointent vers le compte 2, jamais configure par SIPV,
+        # sans description -> rien d'affiche, et elles servent aux appels suivants du compte 1. (Un texte vide ou
+        # invisible ne suffit pas : le telephone le remplace par l'Account Name, puis par l'identifiant SIP.)
+        if b and b.button_type == "line" and account == 0 and mode == 0:
+            if first_line:
+                account, label = SPARE_LINE_ACCOUNT, ""
+            first_line = True
         pm, pa, pd, pv = vpk_pcodes(n)
         out.append({"n": n, "p_mode": pm, "p_account": pa, "p_label": pd, "p_value": pv, "mode": mode,
-                    "account": (b.sip_account_index - 1) if b and mode != -1 else 0,
-                    "label": (b.label or "") if b and mode != -1 else "",
+                    "account": account, "label": label,
                     "value": (b.value or b.destination or "") if b and mode != -1 else ""})
     return out
 
