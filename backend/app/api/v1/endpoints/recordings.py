@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from pydantic import BaseModel
 from app.core.database import get_db
-from app.api.v1.endpoints.auth import get_current_user
+from app.api.v1.endpoints.auth import get_current_user, get_current_user_or_service
 from app.models.recording import RecordingPolicy, CallRecording, StorageBackend
 from app.models.user import User
 
@@ -118,7 +118,7 @@ async def list_recordings(
     include_deleted: bool = Query(False),
     limit: int = Query(100, ge=1, le=1000),
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User | None = Depends(get_current_user_or_service),   # aussi ERPCRM (Dossier de la compagnie, TASK-002.7)
 ):
     filters = [CallRecording.tenant_id == tenant_id]
     if not include_deleted:
