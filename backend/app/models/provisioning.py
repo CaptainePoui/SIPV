@@ -217,6 +217,9 @@ class Wallpaper(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     account_number: Mapped[str | None] = mapped_column(String(20), index=True)      # None = Global
+    # Un fond = une image ; ses versions (une par taille d'ecran) partagent group_id (0083, Philippe : « on choisit le
+    # background, recadrer / crop sont des options de gestion apres »)
+    group_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     resolution: Mapped[str] = mapped_column(String(12), nullable=False)             # « 320x240 », « 480x272 »
     mode: Mapped[str] = mapped_column(String(10), default="crop", server_default="crop", nullable=False)   # fit | crop

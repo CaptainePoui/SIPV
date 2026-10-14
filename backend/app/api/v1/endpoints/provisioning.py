@@ -662,7 +662,8 @@ def _jpeg_size(data: bytes) -> tuple[int, int] | None:
 
 
 def _wallpaper_out(w: Wallpaper) -> dict:
-    return {"id": str(w.id), "account_number": w.account_number, "name": w.name, "resolution": w.resolution, "mode": w.mode,
+    return {"id": str(w.id), "group_id": str(w.group_id or w.id), "account_number": w.account_number, "name": w.name,
+            "resolution": w.resolution, "mode": w.mode,
             "crop": w.crop, "original_name": w.original_name, "has_original": w.has_original, "is_default": w.is_default,
             "global": w.account_number is None, "url": f"/api/v1/provisioning/wallpapers/file/{w.id}.jpg",
             "updated_at": w.updated_at.isoformat() if w.updated_at else None}
@@ -675,7 +676,10 @@ async def wallpaper_url_for(db: AsyncSession, phone, btn_template, tenant, model
     for wid in (phone.wallpaper_id, btn_template.wallpaper_id if btn_template else None):
         if wid:
             w = await db.get(Wallpaper, wid)
-            if w and w.resolution == res:
+            if w and w.resolution != res:     # le fond choisi, dans sa version a la taille de cet ecran
+                w = (await db.execute(select(Wallpaper).where(Wallpaper.group_id == (w.group_id or w.id),
+                                                              Wallpaper.resolution == res))).scalars().first()
+            if w:
                 return f"https://{settings.SIPV_HOST}/wallpaper/{w.id}.jpg"
     for acct in ([tenant.account_number] if tenant else []) + [None]:
         q = select(Wallpaper).where(Wallpaper.resolution == res, Wallpaper.is_default == True,
@@ -713,7 +717,8 @@ async def list_wallpapers(account: str | None = None, db: AsyncSession = Depends
 
 @router.post("/wallpapers", status_code=status.HTTP_201_CREATED)
 async def create_wallpaper(name: str = Form(...), resolution: str = Form(...), account_number: str | None = Form(None),
-                           mode: str = Form("crop"), crop: str | None = Form(None), file: UploadFile = File(...),
+                           mode: str = Form("fit"), crop: str | None = Form(None), group_id: uuid.UUID | None = Form(None),
+                           file: UploadFile = File(...),
                            original: UploadFile | None = File(None), db: AsyncSession = Depends(get_db),
                            _: User | None = Depends(get_current_user_or_service)):
     import json as _json
@@ -721,11 +726,20 @@ async def create_wallpaper(name: str = Form(...), resolution: str = Form(...), a
         raise HTTPException(status_code=422, detail="Résolution invalide")
     w = Wallpaper(name=name.strip(), resolution=resolution, account_number=(account_number or None), mode=mode,
                   crop=_json.loads(crop) if crop else None)
-    first = (await db.execute(select(Wallpaper.id).where(Wallpaper.resolution == resolution,
-             Wallpaper.account_number == w.account_number if w.account_number else Wallpaper.account_number.is_(None)))).first()
-    w.is_default = first is None                     # le premier d'une compagnie (ou du Global) pour cette resolution
+    acct_q = Wallpaper.account_number == w.account_number if w.account_number else Wallpaper.account_number.is_(None)
+    if group_id:
+        g = (await db.execute(select(Wallpaper).where(Wallpaper.group_id == group_id))).scalars().first()
+        if not g:
+            raise HTTPException(status_code=404, detail="Fond d'écran introuvable")
+        if (await db.execute(select(Wallpaper.id).where(Wallpaper.group_id == group_id, Wallpaper.resolution == resolution))).first():
+            raise HTTPException(status_code=422, detail=f"Ce fond a déjà sa version {resolution}")
+        w.account_number, w.name, w.is_default = g.account_number, g.name, g.is_default
+    else:
+        # le premier fond d'une compagnie (ou du Global) devient son fond par defaut
+        w.is_default = (await db.execute(select(Wallpaper.id).where(acct_q))).first() is None
     db.add(w)
     await db.flush()
+    w.group_id = group_id or w.id
     await _save_files(w, file, original)
     await db.commit()
     return _wallpaper_out(w)
@@ -740,6 +754,7 @@ async def update_wallpaper(wallpaper_id: uuid.UUID, name: str | None = Form(None
     if not w:
         raise HTTPException(status_code=404, detail="Fond d'écran introuvable")
     if name:
+        await db.execute(update(Wallpaper).where(Wallpaper.group_id == (w.group_id or w.id)).values(name=name.strip()))
         w.name = name.strip()
     if mode:
         w.mode = mode
@@ -757,9 +772,9 @@ async def set_default_wallpaper(wallpaper_id: uuid.UUID, db: AsyncSession = Depe
     w = await db.get(Wallpaper, wallpaper_id)
     if not w:
         raise HTTPException(status_code=404, detail="Fond d'écran introuvable")
-    await db.execute(update(Wallpaper).where(Wallpaper.resolution == w.resolution,
-                     Wallpaper.account_number == w.account_number if w.account_number else Wallpaper.account_number.is_(None))
-                     .values(is_default=False))
+    await db.execute(update(Wallpaper).where(Wallpaper.account_number == w.account_number if w.account_number
+                                             else Wallpaper.account_number.is_(None)).values(is_default=False))
+    await db.execute(update(Wallpaper).where(Wallpaper.group_id == (w.group_id or w.id)).values(is_default=True))
     w.is_default = True
     await db.commit()
     return _wallpaper_out(w)
@@ -770,14 +785,18 @@ async def delete_wallpaper(wallpaper_id: uuid.UUID, db: AsyncSession = Depends(g
     w = await db.get(Wallpaper, wallpaper_id)
     if not w:
         raise HTTPException(status_code=404, detail="Fond d'écran introuvable")
-    used = (await db.execute(select(PhoneButtonTemplate.id).where(PhoneButtonTemplate.wallpaper_id == w.id))).first() or \
-        (await db.execute(select(ProvisionedPhone.id).where(ProvisionedPhone.wallpaper_id == w.id))).first()
+    versions = (await db.execute(select(Wallpaper).where(Wallpaper.group_id == (w.group_id or w.id)))).scalars().all() or [w]
+    ids = [v.id for v in versions]
+    used = (await db.execute(select(PhoneButtonTemplate.id).where(PhoneButtonTemplate.wallpaper_id.in_(ids)))).first() or \
+        (await db.execute(select(ProvisionedPhone.id).where(ProvisionedPhone.wallpaper_id.in_(ids)))).first()
     if used:
         raise HTTPException(status_code=422, detail="Ce fond d'écran est choisi dans un modèle ou un poste : retirez-le d'abord")
-    await db.delete(w)
+    for v in versions:
+        await db.delete(v)
     await db.commit()
-    for f in (WALLPAPER_DIR / f"{wallpaper_id}.jpg", ORIGINALS_DIR / str(wallpaper_id)):
-        f.unlink(missing_ok=True)
+    for v in ids:
+        for f in (WALLPAPER_DIR / f"{v}.jpg", ORIGINALS_DIR / str(v)):
+            f.unlink(missing_ok=True)
 
 
 @router.get("/wallpapers/file/{wallpaper_id}.jpg")
