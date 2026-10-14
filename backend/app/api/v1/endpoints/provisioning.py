@@ -596,6 +596,8 @@ async def _check_template(db: AsyncSession, payload: ButtonTemplateIn) -> None:
         if n in seen:
             raise HTTPException(status_code=422, detail=f"Touche {i.position} de la page {i.page + 1} en double")
         seen.add(n)
+        if not 1 <= i.sip_account_index <= cat["accounts"]:
+            raise HTTPException(status_code=422, detail=f"Touche {i.position} de la page {i.page + 1} : ce téléphone a {cat['accounts']} comptes")
         if i.button_type not in GS_KEY_MODES:
             raise HTTPException(status_code=422, detail=f"Mode inconnu : {i.button_type}")
         if n > cat["fixed"] and i.button_type in ("line", "shared_line"):

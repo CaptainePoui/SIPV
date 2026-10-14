@@ -11,6 +11,8 @@ Seule source : gabarits officiels du firmware 1.0.11.106 fournis par Philippe
 # Regle verifiee touche par touche pour les 5 modeles. (fixes, total) : les touches fixes sont les touches physiques
 # (page 1) ; les dynamiques forment les pages suivantes, 8 par page sur l'ecran.
 GS_VPK_LAYOUT = {"GXP2130": (3, 12), "GXP2140": (4, 16), "GXP2160": (6, 24), "GXP2135": (8, 32), "GXP2170": (12, 48)}
+# Comptes qu'une touche peut viser (« Account. 0 - Account 1, ... » de chaque section du gabarit)
+GS_ACCOUNTS = {"GXP2130": 3, "GXP2140": 4, "GXP2160": 6, "GXP2135": 4, "GXP2170": 6}
 VPK_KEYS_PER_PAGE = 8
 SPARE_LINE_ACCOUNT = 1      # « Account 2 » (0 = compte 1) : jamais configure par SIPV, sert aux touches Ligne suivantes
 
@@ -130,6 +132,7 @@ def key_catalog(model_name: str | None) -> dict | None:
     fixed, total = layout
     return {
         "fixed": fixed, "total": total, "per_page": VPK_KEYS_PER_PAGE, "pages": -(-total // VPK_KEYS_PER_PAGE),
+        "accounts": GS_ACCOUNTS.get((model_name or "").upper(), 1),
         "modes": [{"key": k, "label": l, "fixed_only": k in FIXED_ONLY_MODES} for k, l in GS_KEY_MODE_LABELS],
         "softkeys": {
             "labels": SOFTKEY_LABELS,
