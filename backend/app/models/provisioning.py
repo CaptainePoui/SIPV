@@ -47,6 +47,7 @@ class ProvisionedPhone(Base):
     # ce niveau.
     # Modele de provisionnement choisi pour ce poste (TASK-051, 2026-10-14) : lien, pas copie -- le modele change, le poste suit
     button_template_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("phone_button_templates.id", ondelete="SET NULL"))
+    softkeys: Mapped[dict | None] = mapped_column(JSON)    # boutons sous l'ecran personnalises pour ce poste (0075)
     selected_tenant_model_template_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list, server_default="{}")
 
     # --- TASK-S011.2 : fiche physique du poste ---

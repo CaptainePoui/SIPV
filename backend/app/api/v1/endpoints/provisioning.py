@@ -136,6 +136,7 @@ class PhoneOut(BaseModel):
     provisioning_protocol: str
     selected_tenant_model_template_ids: list[uuid.UUID] = []  # TASK-S044.2
     button_template_id: uuid.UUID | None = None               # modele de provisionnement choisi (TASK-051)
+    softkeys: dict | None = None                              # boutons sous l'ecran personnalises (0075)
     # Calcule a la volee depuis last_provisioned, pas stocke (TASK-S011.2) -- "jamais" ou
     # "provisionne" (avec la date deja dans last_provisioned). Pas de palier "en retard" :
     # aucun seuil precis n'a ete demande, on n'en invente pas un arbitraire.
@@ -195,6 +196,7 @@ def _phone_out(p: ProvisionedPhone, reveal: bool = False) -> PhoneOut:
         provisioning_protocol=p.provisioning_protocol,
         selected_tenant_model_template_ids=p.selected_tenant_model_template_ids or [],
         button_template_id=p.button_template_id,
+        softkeys=p.softkeys,
         provisioning_status="provisionne" if p.last_provisioned else "jamais",
     )
     if reveal:
@@ -367,7 +369,10 @@ async def get_phone_config(phone_id: uuid.UUID, db: AsyncSession = Depends(get_d
         # Touches a leurs vrais codes Grandstream, par modele (0072) : celles du modele de provisionnement du poste, puis
         # les ajustements du poste (meme place = remplace). Boutons sous l'ecran : seulement avec un modele (0073).
         "vpk_keys": vpk_keys(merge_keys(btn_template.items if btn_template else [], phone.buttons), model.model if model else None),
-        "softkey_items": softkey_items(btn_template.softkeys) if btn_template else [],
+        # Boutons sous l'ecran : ceux du modele, puis les etats personnalises du poste (0075)
+        "softkey_items": softkey_items({"layouts": {**((btn_template.softkeys or {}).get("layouts") or {} if btn_template else {}),
+                                                    **((phone.softkeys or {}).get("layouts") or {})}})
+                         if btn_template or phone.softkeys else [],
         "config_host": f"{settings.SIPV_HOST}:8020",
         "provision_host": settings.SIPV_HOST,
         # P48 (proxy SIP) : adresse publique (0069), sauf poste coche « Interne » -> adresse interne de son serveur
@@ -707,6 +712,38 @@ async def list_phone_button_templates(phone_id: uuid.UUID, db: AsyncSession = De
          .where(PhoneButtonTemplate.tenant_id == phone.tenant_id, PhoneButtonTemplate.phone_model_id == phone.phone_model_id)
          .order_by(PhoneButtonTemplate.name))
     return [await _template_out(db, t) for t in (await db.execute(q)).scalars().all()]
+
+
+class PhoneProvisioningIn(BaseModel):
+    extra_config: dict | None = None
+    softkeys: dict | None = None
+    buttons: list[ButtonTemplateItemIn] = []
+
+
+@router.put("/{phone_id}/provisioning", response_model=PhoneOut)
+async def save_phone_provisioning(phone_id: uuid.UUID, payload: PhoneProvisioningIn, db: AsyncSession = Depends(get_db), _: User | None = Depends(get_current_user_or_service)):
+    """Onglet « Provisionnement » du poste (2026-10-14) : ce que le poste personnalise par-dessus son modele -- options,
+    touches (une touche du poste remplace celle du modele a la meme place) et boutons sous l'ecran -- enregistre d'un coup."""
+    phone = await db.get(ProvisionedPhone, phone_id)
+    if not phone:
+        raise HTTPException(status_code=404, detail="Téléphone introuvable")
+    model = await db.get(PhoneModel, phone.phone_model_id) if phone.phone_model_id else None
+    cat = key_catalog(model.model if model else None)
+    if payload.buttons:
+        if not cat:
+            raise HTTPException(status_code=422, detail="Ce modèle de téléphone n'a pas encore de disposition de touches")
+        await _check_template(db, ButtonTemplateIn(name="poste", phone_model_id=model.id, pages=cat["pages"], items=payload.buttons))
+    for b in (await db.execute(select(PhoneButton).where(PhoneButton.provisioned_phone_id == phone_id))).scalars().all():
+        await db.delete(b)
+    await db.flush()
+    for i in payload.buttons:
+        db.add(PhoneButton(provisioned_phone_id=phone_id, position=i.position, page=i.page, button_type=i.button_type,
+                           label=i.label or None, value=i.value or None, sip_account_index=i.sip_account_index))
+    phone.extra_config = payload.extra_config or None
+    phone.softkeys = payload.softkeys if (payload.softkeys or {}).get("layouts") else None
+    await db.commit()
+    await db.refresh(phone)
+    return _phone_out(phone)
 
 
 @router.put("/{phone_id}/button-template", response_model=PhoneOut)
