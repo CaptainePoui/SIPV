@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 
 _CONNECT_TIMEOUT = 5.0
 _READ_TIMEOUT = 15.0
+# Commandes de lecture seulement : refaites une fois sur une connexion neuve si elles echouent (TASK-S020.5)
+_READ_ONLY_PREFIXES = ("show ", "sofia status", "sofia_contact ", "uuid_getvar ", "reloadxml", "status")
+# Keep-alive (TASK-S020.6) : toutes les 20 s, une lecture sur la connexion partagee ; morte = refaite tout de suite,
+# avant qu'une vraie demande en ait besoin
+_KEEPALIVE_SECONDS = 20
 
 
 class ESLClient:
@@ -32,6 +37,7 @@ class ESLClient:
         self._writer: Optional[asyncio.StreamWriter] = None
         self._connected = False
         self._lock = asyncio.Lock()
+        self._reconnect_lock = asyncio.Lock()
 
     # ── Connection ─────────────────────────────────────────────────────────────
 
@@ -57,6 +63,15 @@ class ESLClient:
             logger.error("ESL connection failed: %s", exc)
             self._connected = False
             return False
+
+    async def reconnect(self) -> bool:
+        """Ferme l'ancienne connexion (sinon elle reste en CLOSE-WAIT) et en ouvre une neuve.
+        Sous verrou : deux appels qui echouent en meme temps ne reconnectent qu'une fois."""
+        async with self._reconnect_lock:
+            if self._connected:
+                return True
+            await self.disconnect()
+            return await self.connect()
 
     async def disconnect(self):
         self._connected = False
@@ -130,8 +145,22 @@ class ESLClient:
         """
         Blocking API call — waits for result.
         Example: await esl.api("sofia status")
+
+        TASK-S020.5 : une commande de LECTURE qui echoue (connexion morte en
+        silence, FreeSWITCH qui ne repond pas a temps) est refaite UNE fois sur
+        une connexion neuve, dans le meme appel ; avant, seul l'appel SUIVANT
+        se reconnectait (S020.4), donc le premier appel du matin pouvait finir
+        en 503. Une commande qui AGIT (originate, uuid_kill, uuid_setvar...)
+        n'est jamais refaite : elle a peut-etre deja ete executee.
         """
-        _, body = await self._send(f"api {command}")
+        try:
+            _, body = await self._send(f"api {command}")
+        except Exception as exc:
+            if not command.startswith(_READ_ONLY_PREFIXES):
+                raise
+            logger.warning("ESL : '%s' a echoue (%r), reconnexion et 2e essai", command, exc)
+            await self.reconnect()
+            _, body = await self._send(f"api {command}")
         return body.strip()
 
     async def bgapi(self, command: str) -> str:
@@ -213,11 +242,12 @@ class ESLClient:
 # ── Singleton ──────────────────────────────────────────────────────────────────
 
 _client: Optional[ESLClient] = None
+_keepalive_task: Optional[asyncio.Task] = None
 
 
 async def esl_startup():
     """Call at FastAPI startup. Connects ESL; logs warning if FreeSWITCH not reachable yet."""
-    global _client
+    global _client, _keepalive_task
     _client = ESLClient(
         host=settings.FREESWITCH_HOST,
         port=settings.FREESWITCH_ESL_PORT,
@@ -231,11 +261,29 @@ async def esl_startup():
             settings.FREESWITCH_HOST,
             settings.FREESWITCH_ESL_PORT,
         )
+    _keepalive_task = asyncio.create_task(_keepalive())
+
+
+async def _keepalive():
+    """TASK-S020.6 : garde la connexion ESL partagee vivante. `status` est une lecture : si la connexion est morte,
+    api() se reconnecte et refait la lecture (S020.5) ; si FreeSWITCH ne repond pas du tout, on reessaie au tour suivant."""
+    while True:
+        await asyncio.sleep(_KEEPALIVE_SECONDS)
+        try:
+            client = await get_esl()
+            await client.api("status")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("ESL keep-alive : FreeSWITCH ne repond pas (%r), nouvel essai dans %d s", exc, _KEEPALIVE_SECONDS)
 
 
 async def esl_shutdown():
     """Call at FastAPI shutdown."""
-    global _client
+    global _client, _keepalive_task
+    if _keepalive_task:
+        _keepalive_task.cancel()
+        _keepalive_task = None
     if _client:
         await _client.disconnect()
         _client = None
@@ -254,5 +302,5 @@ async def get_esl() -> ESLClient:
             password=settings.FREESWITCH_ESL_PASSWORD,
         )
     if not _client.is_connected:
-        await _client.connect()
+        await _client.reconnect()
     return _client
