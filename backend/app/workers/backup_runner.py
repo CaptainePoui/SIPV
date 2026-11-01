@@ -13,16 +13,16 @@ import logging
 import subprocess
 import tarfile
 import tempfile
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.core.config import settings
 from app.core.crypto import decrypt
-from app.core.database import AsyncSessionLocal
+from app.core.database import AsyncSessionLocal, engine
 from app.models.backup import CloudBackupConnection, BackupCycle, BackupRunLog
 from app.core import backup_cloud
 
@@ -153,7 +153,22 @@ async def run_manual() -> list[dict]:
     return results
 
 
+# Verrou PostgreSQL (TASK-S059.1, 2026-11-01) : chaque processus du service (workers, TLS) fait tourner le poller ; un
+# seul à la fois fait la sauvegarde planifiée, les autres passent leur tour.
+_LOCK_KEY = 59001
+
+
 async def run_scheduled():
+    async with engine.connect() as lock_conn:
+        if not (await lock_conn.execute(text("select pg_try_advisory_lock(:k)"), {"k": _LOCK_KEY})).scalar():
+            return
+        try:
+            await _run_scheduled()
+        finally:
+            await lock_conn.execute(text("select pg_advisory_unlock(:k)"), {"k": _LOCK_KEY})
+
+
+async def _run_scheduled():
     async with AsyncSessionLocal() as db:
         connections = (await db.execute(select(CloudBackupConnection).where(CloudBackupConnection.enabled == True))).scalars().all()
         connections = [c for c in connections if c.refresh_token_enc]
@@ -176,7 +191,9 @@ async def run_scheduled():
                 already_attempted = await db.execute(
                     select(BackupRunLog).where(
                         BackupRunLog.provider == connection.provider,
-                        BackupRunLog.started_at >= scheduled_today.astimezone(ZoneInfo("UTC")).replace(tzinfo=None),
+                        # AVEC fuseau (TASK-S059.1) : une heure sans fuseau est lue dans le fuseau du serveur
+                        # (America/Toronto sur SIPV) -> 4 h de décalage et une sauvegarde chaque minute
+                        BackupRunLog.started_at >= scheduled_today.astimezone(timezone.utc),
                     )
                 )
                 if already_attempted.scalars().first():
